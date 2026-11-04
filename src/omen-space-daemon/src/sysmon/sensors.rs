@@ -83,7 +83,7 @@ pub fn init_sensor_paths() -> SensorPaths {
                     if p1.exists() { cpu_pwr_path = Some(p1); }
                 } else if name == "hp_wmi" || name == "hp" || name == "omen" {
                     let board_id = std::fs::read_to_string("/sys/class/dmi/id/board_name").unwrap_or_default();
-                    if !crate::capabilities::LinuxCapabilityClassifier::is_wmaa_abort_prone_board(&board_id) {
+                    if crate::capabilities::LinuxCapabilityClassifier::allows_fan_rpm_telemetry(&board_id) {
                         let f1 = entry.join("fan1_input");
                         if f1.exists() { fan1_path = Some(f1); }
                         let f2 = entry.join("fan2_input");

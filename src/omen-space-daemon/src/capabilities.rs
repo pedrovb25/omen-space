@@ -240,6 +240,16 @@ impl LinuxCapabilityClassifier {
         get_hardware_database().wmaa_abort_prone_boards.contains(&id_upper)
     }
 
+    /// Whether background telemetry may poll hwmon fan*_input on this board.
+    ///
+    /// Abort-prone boards stay opted out unless their boards.json entry explicitly
+    /// sets `supports_rpm_readback` (verified on hardware); boards without an entry
+    /// keep the conservative behaviour.
+    pub fn allows_fan_rpm_telemetry(board_id: &str) -> bool {
+        !Self::is_wmaa_abort_prone_board(board_id)
+            || get_known_model(board_id.trim()).is_some_and(|m| m.supports_rpm_readback)
+    }
+
     /// Returns true when the board_id appears in the community-verified list.
     ///
     /// A "verified" board is one where a user has run the full checklist
@@ -315,5 +325,18 @@ mod tests {
         assert!(cap.allow_decoupled_wmi_thermal_policy_fallback);
         assert!(!cap.supports_undervolt); // AMD should not have undervolt enabled
         assert!(LinuxCapabilityClassifier::is_wmaa_abort_prone_board("8786"));
+    }
+
+    #[test]
+    fn test_fan_rpm_telemetry_gate() {
+        // 8C75: abort-prone, but RPM readback verified on hardware -> GUI gets live RPM.
+        assert!(LinuxCapabilityClassifier::is_wmaa_abort_prone_board("8C75"));
+        assert!(LinuxCapabilityClassifier::allows_fan_rpm_telemetry("8C75\n"));
+        // Abort-prone boards with readback disabled or without an entry stay opted out.
+        assert!(!LinuxCapabilityClassifier::allows_fan_rpm_telemetry("8786"));
+        assert!(!LinuxCapabilityClassifier::allows_fan_rpm_telemetry("88F8"));
+        assert!(!LinuxCapabilityClassifier::allows_fan_rpm_telemetry("878A"));
+        // Non-abort-prone boards are unaffected.
+        assert!(LinuxCapabilityClassifier::allows_fan_rpm_telemetry("8C78"));
     }
 }
