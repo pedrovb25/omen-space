@@ -169,6 +169,8 @@ struct Tray {
     power_profile: String,
     fan_mode: String,
     gpu_mode: String,
+    /// Firmware accepts Advanced Optimus (from Mux.GetGpuInfo supported_modes).
+    gpu_advanced: bool,
     battery_info: Option<String>,
 }
 
@@ -370,6 +372,9 @@ impl ksni::Tray for Tray {
                         ..Default::default()
                     }
                     .into(),
+                ]
+                .into_iter()
+                .chain(self.gpu_advanced.then(|| {
                     CheckmarkItem {
                         label: t("advanced").into(),
                         checked: cur_gpu == "advanced",
@@ -381,8 +386,9 @@ impl ksni::Tray for Tray {
                         }),
                         ..Default::default()
                     }
-                    .into(),
-                ],
+                    .into()
+                }))
+                .collect(),
                 ..Default::default()
             }
             .into(),
@@ -440,6 +446,22 @@ async fn fetch_fan_mode() -> Option<String> {
         }
     }
     None
+}
+
+/// Whether the firmware accepts Advanced Optimus; true when the daemon doesn't say.
+async fn fetch_gpu_supports_advanced() -> bool {
+    if let Ok(conn) = get_conn().await {
+        if let Ok(proxy) = MuxProxy::new(&conn).await {
+            if let Ok(json_str) = proxy.get_gpu_info().await {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                    if let Some(modes) = val.get("supported_modes").and_then(|v| v.as_array()) {
+                        return modes.iter().any(|m| m.as_str() == Some("advanced"));
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 async fn fetch_gpu_mode() -> Option<String> {
@@ -646,12 +668,14 @@ async fn main() {
     let initial_power = fetch_power_profile().await.unwrap_or_else(|| "balanced".into());
     let initial_fan = fetch_fan_mode().await.unwrap_or_else(|| "auto".into());
     let initial_gpu = fetch_gpu_mode().await.unwrap_or_else(|| "hybrid".into());
+    let gpu_advanced = fetch_gpu_supports_advanced().await;
     let initial_bat = fetch_battery_info().await.unwrap_or(None);
 
     let tray = Tray {
         power_profile: initial_power,
         fan_mode: initial_fan,
         gpu_mode: initial_gpu,
+        gpu_advanced,
         battery_info: initial_bat,
     };
 

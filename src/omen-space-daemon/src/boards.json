@@ -2844,7 +2844,7 @@
                 "Cool"
             ],
             "allow_decoupled_wmi_thermal_policy_fallback": false,
-            "has_mux_switch": false,
+            "has_mux_switch": true,
             "supports_gpu_power_boost": true,
             "supports_advanced_optimus": false,
             "has_keyboard_backlight": true,
