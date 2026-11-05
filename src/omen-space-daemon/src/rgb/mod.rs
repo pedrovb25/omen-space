@@ -34,6 +34,8 @@ const VALID_DIRECTIONS: &[&str] = &["ltr", "rtl"];
 
 // Config persistence
 const CONFIG_PATH: &str = "/etc/omen-space/rgb.json";
+/// uleds LED the daemon registers for desktop keyboard-backlight integration (UPower/KDE).
+const OS_KBD_LED_BRIGHTNESS: &str = "/sys/class/leds/omen::kbd_backlight/brightness";
 const PER_KEY_MAP_PATH: &str = "/root/.config/omen-space/per_key_map.json";
 
 // ── Hardware detection ─────────────────────────────────────────────────────────
@@ -640,6 +642,16 @@ impl RgbService {
         }
     }
 
+    /// Mirror the current keyboard brightness into the uleds LED so desktop sliders show it.
+    /// The uleds event this triggers carries the same value and is a no-op in the monitor loop.
+    async fn sync_os_led(inner: &Arc<Mutex<RgbInner>>) {
+        let level = {
+            let g = inner.lock().await;
+            if g.config.power { g.config.brightness } else { 0 }
+        };
+        let _ = tokio::fs::write(OS_KBD_LED_BRIGHTNESS, level.to_string()).await;
+    }
+
     /// Listens for brightness changes from /dev/uleds to integrate natively with Linux OS brightness sliders
     async fn uleds_monitor_loop(inner: Arc<Mutex<RgbInner>>) {
         #[repr(C)]
@@ -654,6 +666,18 @@ impl RgbService {
         };
         let name_str = b"omen::kbd_backlight";
         dev.name[..name_str.len()].copy_from_slice(name_str);
+
+        // uleds ships with the kernel but is not auto-loaded; without it the desktop shows
+        // no keyboard backlight (KDE: "nan %").
+        if !Path::new("/dev/uleds").exists() {
+            let _ = std::process::Command::new("modprobe").arg("uleds").output();
+            for _ in 0..20 {
+                if Path::new("/dev/uleds").exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
 
         let file = match File::options().read(true).write(true).open("/dev/uleds") {
             Ok(f) => f,
@@ -680,6 +704,9 @@ impl RgbService {
 
         info!("Successfully registered /sys/class/leds/omen::kbd_backlight");
 
+        // The new LED starts at 0; publish the real level so the keyboard isn't switched off.
+        Self::sync_os_led(&inner).await;
+
         // Now convert to async file to avoid blocking executor during read
         let mut async_file = tokio::fs::File::from_std(std_file);
 
@@ -692,13 +719,16 @@ impl RgbService {
                     {
                         let mut g = inner.lock().await;
                         let clamped = new_brightness.clamp(0, 100) as u32;
-                        if g.config.brightness != clamped || (clamped > 0 && !g.config.power) {
-                            g.config.brightness = clamped;
-                            if clamped > 0 {
-                                g.config.power = true;
-                            } else {
-                                g.config.power = false; // Usually 0 means off
+                        if clamped == 0 {
+                            // 0 means off; keep the stored level so turning it back on restores it.
+                            if g.config.power {
+                                g.config.power = false;
+                                g.config.save();
+                                should_apply = true;
                             }
+                        } else if g.config.brightness != clamped || !g.config.power {
+                            g.config.brightness = clamped;
+                            g.config.power = true;
                             g.config.save();
                             should_apply = true;
                         }
@@ -1021,8 +1051,9 @@ impl RgbService {
             g.config.direction = direction_str;
             g.config.save();
         }
-        
+
         Self::apply_state(self.inner.clone()).await;
+        Self::sync_os_led(&self.inner).await;
         "OK".to_string()
     }
 
