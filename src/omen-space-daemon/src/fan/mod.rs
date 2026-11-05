@@ -15,6 +15,9 @@ pub const THERMAL_PROTECTION_RECOVER_TEMP: f64 = 82.0;
 /// Seconds (1 Hz samples) a thermal condition must persist before a desktop notice is shown (#327).
 const NOTICE_PERSIST_TICKS: u32 = 3;
 pub const AUTO_PEAK_HOLD_SECS: u64 = 15;
+/// EC fan-level boards: max decrease of the requested level per 1 Hz tick, so leaving Max
+/// or a falling curve spins the fans down gradually (~30 s from 100% to stop) instead of abruptly.
+pub const EC_LEVEL_RAMP_DOWN_PER_TICK: u8 = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CurvePoint(pub f64, pub f64); // [Temp, Pct]
@@ -52,6 +55,14 @@ pub struct FanState {
     pub last_written_duty_time: Option<std::time::Instant>,
     pub last_hw_detect_attempt: std::time::Instant,
     pub signal_ctx: Option<zbus::SignalContext<'static>>,
+    /// Board drives fan levels through EC XSS1/XSS2 (capabilities: supports_ec_fan_level).
+    pub ec_fan_level: bool,
+    /// Last XSS level written; re-verified against the EC each tick.
+    pub last_ec_level: Option<u8>,
+    pub last_ec_level_warn: Option<std::time::Instant>,
+    /// Level to ramp down from when no XSS level is held. Set when entering Max and
+    /// replaced by the EC's actual speed on the first level written after Max.
+    pub ec_level_ramp_from: Option<u8>,
 }
 
 #[derive(Clone)]
@@ -111,7 +122,17 @@ impl FanService {
             last_written_duty_time: None,
             last_hw_detect_attempt: std::time::Instant::now(),
             signal_ctx: None,
+            ec_fan_level: {
+                let board_id = std::fs::read_to_string("/sys/class/dmi/id/board_name").unwrap_or_default();
+                crate::capabilities::detect(board_id.trim(), "", "").supports_ec_fan_level
+            },
+            last_ec_level: None,
+            last_ec_level_warn: None,
+            ec_level_ramp_from: None,
         };
+        if state.ec_fan_level {
+            info!("EC fan-level control (XSS1/XSS2) enabled for this board; the daemon drives non-Max fan levels.");
+        }
         Self::detect_hardware(&mut state).await;
         
         // Read current hardware mode
@@ -389,6 +410,9 @@ impl FanService {
         let now = std::time::Instant::now();
 
         if pct == 100 {
+            if state.ec_fan_level {
+                Self::release_ec_fan_level_for_max(state);
+            }
             // Max boost mode: pwm1_enable must be 0
             if sysfs_exists(&pwm_enable_path).await {
                 let current = sysfs_read(&pwm_enable_path, 2).await;
@@ -420,12 +444,16 @@ impl FanService {
         };
 
         // If the hardware does not expose a manual PWM node, intermediate duty cycles cannot be set
+        // through hwmon; boards with supports_ec_fan_level take the level through EC XSS1/XSS2 instead.
         if !sysfs_exists(&pwm_path).await {
             if sysfs_exists(&pwm_enable_path).await {
                 let current = sysfs_read(&pwm_enable_path, 2).await;
                 if current != 2 {
                     let _ = sysfs_write(&pwm_enable_path, "2").await;
                 }
+            }
+            if state.ec_fan_level {
+                Self::apply_ec_fan_level(state, pct);
             }
             state.last_written_duty = Some(duty);
             state.last_written_duty_time = Some(now);
@@ -961,6 +989,67 @@ impl FanService {
         }
     }
 
+    /// Request `pct` through EC XSS1/XSS2. Rewrites when the level changes or the EC no
+    /// longer holds it (resume, EC reset), so the loop's per-tick call doubles as keep-alive.
+    fn apply_ec_fan_level(state: &mut FanState, pct: u32) {
+        let target = pct.min(100) as u8;
+        let mut ec = crate::ec::LinuxEcController::new();
+        // Leaving Max: ramp from the speed the EC actually reached (Max may have been left
+        // before the fans spun all the way up), never from a fixed 100%.
+        if state.last_ec_level.is_none() && state.ec_level_ramp_from.is_some() {
+            state.ec_level_ramp_from = Some(ec.fan_speed_pct());
+        }
+        let level = Self::ramped_ec_level(state.last_ec_level.or(state.ec_level_ramp_from), target);
+        if state.last_ec_level == Some(level) && ec.fan_level() == (level, level) {
+            return;
+        }
+        if ec.set_fan_level(level) {
+            state.last_ec_level = Some(level);
+            state.ec_level_ramp_from = None;
+        } else {
+            state.last_ec_level = None;
+            let warn_ok = state.last_ec_level_warn
+                .map(|t| t.elapsed() >= std::time::Duration::from_secs(60))
+                .unwrap_or(true);
+            if warn_ok {
+                state.last_ec_level_warn = Some(std::time::Instant::now());
+                warn!("EC fan level {}% could not be written (is ec_sys loaded with write_support=1?)", level);
+            }
+        }
+    }
+
+    /// Increases apply at once; decreases step down by at most EC_LEVEL_RAMP_DOWN_PER_TICK.
+    fn ramped_ec_level(current: Option<u8>, target: u8) -> u8 {
+        match current {
+            Some(cur) if target < cur => target.max(cur.saturating_sub(EC_LEVEL_RAMP_DOWN_PER_TICK)),
+            _ => target,
+        }
+    }
+
+    /// WMI Max (pwm1_enable=0) is ignored while an XSS level is requested (8C75: XSS=0 + Max
+    /// stays at 0 RPM), so withdraw the host request first. Leaving Max re-applies a level,
+    /// ramping down from the speed the fans actually reached.
+    fn release_ec_fan_level_for_max(state: &mut FanState) {
+        let mut ec = crate::ec::LinuxEcController::new();
+        let released = (crate::ec::EC_FAN_LEVEL_RELEASE, crate::ec::EC_FAN_LEVEL_RELEASE);
+        if ec.fan_level() != released && !ec.release_fan_level() {
+            warn!("Could not release EC fan level before Max; Max may not take effect.");
+        }
+        state.last_ec_level = None;
+        state.ec_level_ramp_from = Some(100);
+    }
+
+    /// Hand fan control back to the EC on daemon shutdown (boards with EC fan-level control).
+    pub async fn release_ec_fan_level(&self) {
+        let mut state = self.state.lock().await;
+        if state.ec_fan_level && state.last_ec_level.is_some() {
+            if crate::ec::LinuxEcController::new().release_fan_level() {
+                info!("Released EC fan-level request (XSS1/XSS2 = 0xFF) on shutdown.");
+            }
+            state.last_ec_level = None;
+        }
+    }
+
     async fn has_pwm_fallback(state: &FanState) -> bool {
         if let Some(ref hwmon) = state.hwmon_path {
             sysfs_exists(hwmon.join("pwm1")).await
@@ -1007,6 +1096,10 @@ impl FanService {
         }
 
         let _suppress_ec = std::mem::take(&mut state.suppress_ec_notice);
+
+        if pwm_enable_val == 0 && state.ec_fan_level {
+            Self::release_ec_fan_level_for_max(state);
+        }
 
         // Step 1: Write pwm1_enable
         let mut ok = false;
@@ -1090,7 +1183,15 @@ impl FanService {
         // thermal policy to match.
         let mut ec = crate::ec::LinuxEcController::new();
         let needs_ec = ec.needs_ec_fallback();
-        
+
+        // Delegating to the EC withdraws the host level request; other modes re-apply theirs
+        // from the monitor loop on the next tick.
+        if mode == "ec" && state.ec_fan_level {
+            ec.release_fan_level();
+            state.last_ec_level = None;
+            state.ec_level_ramp_from = None;
+        }
+
         if mode == "auto" && needs_ec {
             // Full EC reset for legacy boards that need it
             ec.restore_auto_mode().await;
@@ -1194,7 +1295,9 @@ impl FanService {
         let is_available = state.hwmon_path.is_some() && state.fan_count > 0;
         let mut supports_custom = false;
         if let Some(ref hwmon) = state.hwmon_path {
-            supports_custom = Self::has_pwm_fallback(&state).await || sysfs_exists(hwmon.join("fan1_target")).await;
+            supports_custom = Self::has_pwm_fallback(&state).await
+                || sysfs_exists(hwmon.join("fan1_target")).await
+                || state.ec_fan_level;
         }
         let thermal_protection = state.thermal_protection_active;
         let thermal_protection_enabled = state.thermal_protection_enabled;
@@ -1398,6 +1501,25 @@ mod tests {
         assert!(THERMAL_PROTECTION_RECOVER_TEMP <= 85.0, "Recover must allow normal operation");
         assert!(THERMAL_PROTECTION_TRIGGER_TEMP > THERMAL_PROTECTION_RECOVER_TEMP, "Trigger must be higher than recover");
         assert_eq!(AUTO_PEAK_HOLD_SECS, 15, "Peak hold must be responsive");
+    }
+
+    #[test]
+    fn test_ec_level_ramp() {
+        // Increases are immediate; first write with nothing held is immediate.
+        assert_eq!(FanService::ramped_ec_level(Some(30), 75), 75);
+        assert_eq!(FanService::ramped_ec_level(None, 40), 40);
+        // Decreases step down per tick until the target is reached.
+        assert_eq!(FanService::ramped_ec_level(Some(100), 0), 100 - EC_LEVEL_RAMP_DOWN_PER_TICK);
+        assert_eq!(FanService::ramped_ec_level(Some(2), 0), 0);
+        assert_eq!(FanService::ramped_ec_level(Some(41), 40), 40);
+        // Leaving Max at 100% reaches a stop in a reasonable time.
+        let mut level = 100u8;
+        let mut ticks = 0;
+        while level > 0 {
+            level = FanService::ramped_ec_level(Some(level), 0);
+            ticks += 1;
+        }
+        assert!((20..=60).contains(&ticks), "ramp-down from Max took {} ticks", ticks);
     }
 
     #[test]

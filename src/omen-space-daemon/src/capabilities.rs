@@ -41,6 +41,10 @@ pub struct ModelCapabilities {
     // Fan Control
     pub supports_fan_control_wmi: bool,
     pub supports_fan_control_ec: bool,
+    /// EC has no working automatic fan curve but honours requested fan levels in
+    /// XSS1/XSS2 (0x2C/0x2D, %). The daemon then drives every non-Max level itself.
+    #[serde(default)]
+    pub supports_ec_fan_level: bool,
     pub supports_fan_curves: bool,
     pub supports_independent_fan_curves: bool,
     pub supports_rpm_readback: bool,
@@ -91,6 +95,7 @@ impl Default for ModelCapabilities {
             
             supports_fan_control_wmi: true,
             supports_fan_control_ec: false,
+            supports_ec_fan_level: false,
             supports_fan_curves: true,
             supports_independent_fan_curves: true,
             supports_rpm_readback: true,
@@ -338,5 +343,13 @@ mod tests {
         assert!(!LinuxCapabilityClassifier::allows_fan_rpm_telemetry("878A"));
         // Non-abort-prone boards are unaffected.
         assert!(LinuxCapabilityClassifier::allows_fan_rpm_telemetry("8C78"));
+    }
+
+    #[test]
+    fn test_ec_fan_level_is_opt_in() {
+        assert!(detect("8C75", "", "").supports_ec_fan_level);
+        // Sibling and default boards keep their existing fan paths.
+        assert!(!detect("8C78", "", "").supports_ec_fan_level);
+        assert!(!detect("FFFF", "", "").supports_ec_fan_level);
     }
 }
