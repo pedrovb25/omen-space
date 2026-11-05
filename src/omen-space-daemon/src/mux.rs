@@ -228,8 +228,19 @@ impl MuxService {
         let mode = Self::detect_mode().await;
         let displays = Self::get_displays().await;
 
+        // Modes the board's firmware accepts. Boards with a boards.json entry follow its
+        // supports_advanced_optimus flag (8C75: hp-wmi rejects mode 2); others keep all three.
+        let board_id = std::fs::read_to_string("/sys/class/dmi/id/board_name").unwrap_or_default();
+        let caps = crate::capabilities::detect(board_id.trim(), "", "");
+        let supported_modes: Vec<&str> = if caps.product_id != "DEFAULT" && !caps.supports_advanced_optimus {
+            vec!["hybrid", "discrete"]
+        } else {
+            vec!["hybrid", "discrete", "advanced"]
+        };
+
         let json = serde_json::json!({
             "available": available,
+            "supported_modes": supported_modes,
             "backend": backend,
             "available_backends": available_backends,
             "forced_backend": forced_backend,

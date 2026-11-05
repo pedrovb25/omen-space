@@ -308,6 +308,7 @@ pub fn build_page() -> gtk::Box {
     let bd_load = btn_discrete.clone();
     let bh_load = btn_hybrid.clone();
     let ba_load = btn_advanced.clone();
+    let wa_load = wrap_advanced.clone();
     let fw_val_load = fw_mode_val.clone();
     let disp_val_load = disp_val.clone();
     let upd_load = updating_ui.clone();
@@ -315,6 +316,10 @@ pub fn build_page() -> gtk::Box {
     glib::spawn_future_local(async move {
         if let Ok(json) = crate::daemon_client::get_gpu_info_async().await {
             if let Ok(info) = serde_json::from_str::<serde_json::Value>(&json) {
+                // Hide modes the firmware rejects (older daemons omit the list: keep all).
+                if let Some(modes) = info.get("supported_modes").and_then(|v| v.as_array()) {
+                    wa_load.set_visible(modes.iter().any(|m| m.as_str() == Some("advanced")));
+                }
                 let confirmed_mode = info
                     .get("mode")
                     .and_then(|v| v.as_str())
