@@ -143,7 +143,50 @@ impl PowerService {
             .and_then(|v| v.parse::<u64>().ok())
             .map(|uw| (uw / 1_000_000) as u32)
             .filter(|&w| (5..=250).contains(&w));
+        if p1.is_none() && p2.is_none() && Self::is_amd_cpu() {
+            // AMD exposes no RAPL limit constraints; the SMU holds them (STAPM / PPT fast).
+            return Self::read_amd_limits().await;
+        }
         (p1, p2)
+    }
+
+    fn is_amd_cpu() -> bool {
+        std::fs::read_to_string("/proc/cpuinfo")
+            .map(|s| s.contains("AuthenticAMD"))
+            .unwrap_or(false)
+    }
+
+    /// Current AMD STAPM and PPT-fast limits in W from `ryzenadj -i`. Cached for a few
+    /// seconds because GetPowerProfile is polled by the GUI.
+    async fn read_amd_limits() -> (Option<u32>, Option<u32>) {
+        static CACHE: std::sync::Mutex<Option<(std::time::Instant, (Option<u32>, Option<u32>))>> =
+            std::sync::Mutex::new(None);
+        if let Some((at, v)) = *CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
+            if at.elapsed() < std::time::Duration::from_secs(5) {
+                return v;
+            }
+        }
+        let limits = match tokio::process::Command::new("ryzenadj").arg("-i").output().await {
+            Ok(out) => Self::parse_ryzenadj_limits(&String::from_utf8_lossy(&out.stdout)),
+            Err(_) => (None, None),
+        };
+        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), limits));
+        limits
+    }
+
+    /// Parse "| STAPM LIMIT | 54.000 | stapm-limit |" style rows of `ryzenadj -i`.
+    fn parse_ryzenadj_limits(info: &str) -> (Option<u32>, Option<u32>) {
+        let value = |name: &str| {
+            info.lines().find_map(|line| {
+                let cols: Vec<&str> = line.split('|').map(str::trim).collect();
+                (cols.len() > 2 && cols[1] == name)
+                    .then(|| cols[2].parse::<f64>().ok())
+                    .flatten()
+                    .map(|w| w.round() as u32)
+                    .filter(|w| (5..=250).contains(w))
+            })
+        };
+        (value("STAPM LIMIT"), value("PPT LIMIT FAST"))
     }
 
     async fn load_or_capture_boot_rapl_baseline() -> (u32, u32) {
@@ -807,6 +850,12 @@ impl PowerService {
         if let Some(val) = sysfs_read_async("/sys/class/powercap/intel-rapl/intel-rapl:0/constraint_1_power_limit_uw").await {
             if let Ok(uw) = val.parse::<u32>() { real_pl2 = uw / 1_000_000; }
         }
+        let is_amd = Self::is_amd_cpu();
+        if is_amd {
+            let (amd_pl1, amd_pl2) = Self::read_amd_limits().await;
+            real_pl1 = amd_pl1.unwrap_or(real_pl1);
+            real_pl2 = amd_pl2.unwrap_or(real_pl2);
+        }
 
         let json = serde_json::json!({
             "available": true,
@@ -822,6 +871,7 @@ impl PowerService {
             "boot_pl1_w": self.boot_pl1_w,
             "boot_pl2_w": self.boot_pl2_w,
             "pl_enabled": cfg.pl_enabled,
+            "is_amd": is_amd,
             "gpu_w": cfg.gpu_w,
         });
         json.to_string()
@@ -886,7 +936,14 @@ impl PowerService {
             cfg.save();
         }
 
-        Self::apply_rapl_limits(target_pl1, target_pl2).await;
+        if enabled || !Self::is_amd_cpu() {
+            Self::apply_rapl_limits(target_pl1, target_pl2).await;
+        } else {
+            // AMD: re-writing a captured "boot" value would pin the limits again and override
+            // the firmware/amd-pmf per-profile management; stop overriding instead. Limits set
+            // earlier by ryzenadj last until the next boot or profile change.
+            info!("SetPowerLimits: AMD custom limits disabled; firmware manages STAPM/PPT again after the next boot or profile change.");
+        }
 
         info!(
             "SetPowerLimits: enabled={}, PL1={}W, PL2={}W",
@@ -944,5 +1001,23 @@ impl PowerService {
 
     async fn ping(&self) -> String {
         "OK".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ryzenadj_limits() {
+        let info = "CPU Family: Hawk Point\n\
+            |        Name         |   Value   |     Parameter      |\n\
+            |---------------------|-----------|--------------------|\n\
+            | STAPM LIMIT         |    54.000 | stapm-limit        |\n\
+            | STAPM VALUE         |    10.234 |                    |\n\
+            | PPT LIMIT FAST      |    65.000 | fast-limit         |\n\
+            | PPT LIMIT SLOW      |    54.000 | slow-limit         |\n";
+        assert_eq!(PowerService::parse_ryzenadj_limits(info), (Some(54), Some(65)));
+        assert_eq!(PowerService::parse_ryzenadj_limits("no compatible ryzen_smu"), (None, None));
     }
 }
