@@ -277,7 +277,23 @@ pub fn build_page(window: &adw::ApplicationWindow, on_lang_changed: Option<Rc<dy
         .title(i18n::t("battery_care"))
         .subtitle(&bat_sub)
         .build();
-    battery_row.set_active(init_battery_care);
+    // The daemon can only cap charging through charge_control_end_threshold; without it the
+    // switch would claim a limit that is never applied.
+    let charge_limit_supported = std::fs::read_dir("/sys/class/power_supply")
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                e.file_name().to_string_lossy().starts_with("BAT")
+                    && e.path().join("charge_control_end_threshold").exists()
+            })
+        })
+        .unwrap_or(false);
+    if charge_limit_supported {
+        battery_row.set_active(init_battery_care);
+    } else {
+        battery_row.set_active(false);
+        battery_row.set_sensitive(false);
+        battery_row.set_subtitle(i18n::t("battery_care_unsupported"));
+    }
     perf_group.add(&battery_row);
 
     let thermal_row = adw::SwitchRow::builder()

@@ -477,6 +477,10 @@ pub fn build_page() -> gtk::Box {
                     volt_group_clone.set_description(Some(i18n::t("amd_co_desc")));
                     core_row_clone.set_title(i18n::t("amd_co_title"));
                     core_row_clone.set_subtitle(i18n::t("amd_co_sub"));
+                    if locked {
+                        volt_group_clone.set_sensitive(false);
+                        core_row_clone.set_subtitle(i18n::t("amd_co_unsupported"));
+                    }
                     *core_unit_load.borrow_mut() = "";
                     core_lbl_load.set_label(&format!("{}", core_scale_range.value() as i32));
                     // On AMD the daemon applies this as ryzenadj --tctl-temp.
