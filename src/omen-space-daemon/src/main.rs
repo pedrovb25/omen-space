@@ -134,7 +134,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    std::future::pending::<()>().await;
+    // Run until systemd stops us (SIGTERM) or Ctrl+C, then release host fan requests to the EC.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        _ = sigterm.recv() => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
+    info!("Shutdown signal received.");
+    fan_service.release_ec_fan_level().await;
 
     Ok(())
 }

@@ -8,6 +8,11 @@ use log::{info, warn, debug};
 
 const EC_PATH: &str = "/sys/kernel/debug/ec/ec0/io";
 
+/// XSS1/XSS2: requested fan level in % (boards with supports_ec_fan_level).
+const REG_FAN1_LEVEL_SET: u64 = 0x2C;
+const REG_FAN2_LEVEL_SET: u64 = 0x2D;
+/// XSS value meaning "no host request": the EC's own logic drives the fans.
+pub const EC_FAN_LEVEL_RELEASE: u8 = 0xFF;
 const REG_FAN1_SPEED_PCT: u64 = 0x2E;
 const REG_FAN2_SPEED_PCT: u64 = 0x2F;
 const REG_FAN1_SPEED_SET: u64 = 0x34;
@@ -194,6 +199,28 @@ impl LinuxEcController {
         let pct = pct.clamp(0, 100) as u8;
         let reg = if fan_idx == 1 { REG_FAN1_SPEED_PCT } else { REG_FAN2_SPEED_PCT };
         self.write_byte(reg, pct)
+    }
+
+    /// Request the same fan level (0-100 %) on both fans through XSS1/XSS2.
+    pub fn set_fan_level(&mut self, pct: u8) -> bool {
+        let pct = pct.min(100);
+        self.write_byte(REG_FAN1_LEVEL_SET, pct) && self.write_byte(REG_FAN2_LEVEL_SET, pct)
+    }
+
+    /// Withdraw the host fan-level request so the EC's own logic takes over again.
+    pub fn release_fan_level(&mut self) -> bool {
+        self.write_byte(REG_FAN1_LEVEL_SET, EC_FAN_LEVEL_RELEASE)
+            && self.write_byte(REG_FAN2_LEVEL_SET, EC_FAN_LEVEL_RELEASE)
+    }
+
+    /// Actual fan speed in % (XGS1/XGS2), the higher of both fans.
+    pub fn fan_speed_pct(&mut self) -> u8 {
+        self.read_byte(REG_FAN1_SPEED_PCT).max(self.read_byte(REG_FAN2_SPEED_PCT)).min(100)
+    }
+
+    /// Currently requested XSS1/XSS2 levels as held by the EC.
+    pub fn fan_level(&mut self) -> (u8, u8) {
+        (self.read_byte(REG_FAN1_LEVEL_SET), self.read_byte(REG_FAN2_LEVEL_SET))
     }
 
     pub fn set_fan_boost(&mut self, enable: bool) -> bool {

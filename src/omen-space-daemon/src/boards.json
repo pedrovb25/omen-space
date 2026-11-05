@@ -2830,6 +2830,7 @@
             "family": "OMEN17",
             "supports_fan_control_wmi": true,
             "supports_fan_control_ec": false,
+            "supports_ec_fan_level": true,
             "supports_fan_curves": true,
             "supports_independent_fan_curves": true,
             "supports_rpm_readback": true,
@@ -2855,7 +2856,7 @@
             "supports_power_limits": true,
             "supports_battery_care": true,
             "linux_assessment": null,
-            "notes": "OMEN 17-db0xxx (Ryzen 7 8845HS + RTX 4070), BIOS F.24 / EC 3.39. Stays in wmaa_abort_prone_boards (#175); feature flags mirror the defaults this board received before it had an entry. RPM readback verified: hp-wmi fan1_input/fan2_input track a real tachometer (0 at idle fan-stop, smooth 1500->4500 ramp under load, ~4400/4000 in Max) with no AE_AML_BUFFER_LIMIT errors after boot."
+            "notes": "OMEN 17-db0xxx (Ryzen 7 8845HS + RTX 4070), BIOS F.24 / EC 3.39. Stays in wmaa_abort_prone_boards (#175); other feature flags mirror the defaults this board received before it had an entry. RPM readback verified: hp-wmi fan1_input/fan2_input track a real tachometer (0 at idle fan-stop, smooth 1500->4500 ramp under load, ~4400/4000 in Max) with no AE_AML_BUFFER_LIMIT errors after boot. Root cause of #175: with XSS1/XSS2 = 0xFF the EC holds its last level (~45% after an EC reset) and stops the fans when cool, but never restarts them (0 RPM at 95°C Tctl for 73 s). Writing XSS1/XSS2 (0x2C/0x2D) is honoured: 30% -> ~1330 RPM, 70% -> ~3150/3010 RPM, 0xFF hands control back; hence supports_ec_fan_level."
         },
         {
             "product_id": "8EEF",
