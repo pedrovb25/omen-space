@@ -479,8 +479,8 @@ pub fn build_page() -> gtk::Box {
                     core_row_clone.set_subtitle(i18n::t("amd_co_sub"));
                     *core_unit_load.borrow_mut() = "";
                     core_lbl_load.set_label(&format!("{}", core_scale_range.value() as i32));
-                    // TCC offset is an Intel MSR feature; the daemon has no AMD path for it.
-                    tcc_row_load.set_visible(false);
+                    // On AMD the daemon applies this as ryzenadj --tctl-temp.
+                    tcc_row_load.set_title(i18n::t("amd_tcc_label"));
                 } else {
                     badge_load.set_label("MSR OK");
                     badge_load.set_css_classes(&["badge-ok"]);
@@ -572,22 +572,19 @@ pub fn build_page() -> gtk::Box {
                     pwr_group_load.set_description(Some(i18n::t("amd_pl_desc")));
                     pl1_row_load.set_title(i18n::t("amd_pl1_label"));
                     pl2_row_load.set_title(i18n::t("amd_pl2_label"));
+                    // AMD limits can't be read back, so say who is in charge instead of a value.
+                    let custom = state.get("pl_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let note = i18n::t(if custom { "amd_pl_custom" } else { "amd_pl_firmware" });
+                    pl1_row_load.set_subtitle(note);
+                    pl2_row_load.set_subtitle(note);
                 }
                 if let Some(boot_pl1) = state.get("boot_pl1_w").and_then(|v| v.as_f64()) {
                     *def_pl1_load.borrow_mut() = boot_pl1;
-                    if amd {
-                        pl1_row_load.set_subtitle(&format!("{}: {:.0} W", i18n::t("fw_boot_value"), boot_pl1));
-                    } else {
-                        pl1_row_load.set_subtitle(&format!("{} (Boot default: {:.0} W)", i18n::t("pl1_sub"), boot_pl1));
-                    }
+                    pl1_row_load.set_subtitle(&format!("{} (Boot default: {:.0} W)", i18n::t("pl1_sub"), boot_pl1));
                 }
                 if let Some(boot_pl2) = state.get("boot_pl2_w").and_then(|v| v.as_f64()) {
                     *def_pl2_load.borrow_mut() = boot_pl2;
-                    if amd {
-                        pl2_row_load.set_subtitle(&format!("{}: {:.0} W", i18n::t("fw_boot_value"), boot_pl2));
-                    } else {
-                        pl2_row_load.set_subtitle(&format!("{} (Boot default: {:.0} W)", i18n::t("pl2_sub"), boot_pl2));
-                    }
+                    pl2_row_load.set_subtitle(&format!("{} (Boot default: {:.0} W)", i18n::t("pl2_sub"), boot_pl2));
                 }
                 if let Some(pl1) = state.get("pl1_w").and_then(|v| v.as_f64()) {
                     pl1_s_load.set_value(pl1);
