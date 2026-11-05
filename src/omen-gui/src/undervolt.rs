@@ -108,6 +108,8 @@ pub fn build_page() -> gtk::Box {
 
     // 1. Core Voltage Offset — initialize then load from daemon
     let core_val = Rc::new(RefCell::new(0i32));
+    // AMD Curve Optimizer works in steps, not mV; the loader switches this to "".
+    let core_unit = Rc::new(RefCell::new(" mV"));
     let core_row = adw::ActionRow::builder()
         .title(i18n::t("core_offset_title"))
         .subtitle(i18n::t("core_offset_sub"))
@@ -125,10 +127,11 @@ pub fn build_page() -> gtk::Box {
         .build();
     let core_lbl_clone = core_lbl.clone();
     let core_val_clone = core_val.clone();
+    let core_unit_clone = core_unit.clone();
     core_scale.connect_value_changed(move |s| {
         let val = s.value() as i32;
         *core_val_clone.borrow_mut() = val;
-        core_lbl_clone.set_label(&format!("{} mV", val));
+        core_lbl_clone.set_label(&format!("{}{}", val, core_unit_clone.borrow()));
     });
     core_row.add_suffix(&core_scale);
     core_row.add_suffix(&core_lbl);
@@ -224,6 +227,8 @@ pub fn build_page() -> gtk::Box {
     let loaded_core_mv = Rc::new(RefCell::new(0i32));
     let loaded_cache_mv = Rc::new(RefCell::new(0i32));
     let loaded_tcc = Rc::new(RefCell::new(0i32));
+    // PL1/PL2 as last loaded or applied; Apply only sends limits the user actually changed.
+    let loaded_pl = Rc::new(RefCell::new((0i32, 0i32)));
 
     let tcc_row = adw::ActionRow::builder()
         .title(i18n::t("tcc_label"))
@@ -286,12 +291,14 @@ pub fn build_page() -> gtk::Box {
     let loaded_core_reset = loaded_core_mv.clone();
     let loaded_cache_reset = loaded_cache_mv.clone();
     let loaded_tcc_reset = loaded_tcc.clone();
+    let loaded_pl_reset = loaded_pl.clone();
     reset_btn.connect_clicked(move |_| {
         let def1 = *def_pl1_reset.borrow();
         let def2 = *def_pl2_reset.borrow();
         pl1_s_c.set_value(def1);
         pl2_s_c.set_value(def2);
         crate::daemon_client::reset_power_limits_sync(def1 as i32, def2 as i32);
+        *loaded_pl_reset.borrow_mut() = (pl1_s_c.value() as i32, pl2_s_c.value() as i32);
 
         if !*v_locked_reset.borrow() {
             core_s_c.set_value(0.0);
@@ -326,6 +333,7 @@ pub fn build_page() -> gtk::Box {
     let loaded_core_apply = loaded_core_mv.clone();
     let loaded_cache_apply = loaded_cache_mv.clone();
     let loaded_tcc_apply = loaded_tcc.clone();
+    let loaded_pl_apply = loaded_pl.clone();
     let warn_title_apply = warn_title.clone();
     let warn_desc_apply = warn_desc.clone();
     let badge_apply = status_badge.clone();
@@ -362,7 +370,11 @@ pub fn build_page() -> gtk::Box {
             });
         }
 
-        crate::daemon_client::set_power_limits_sync(pl1, pl2);
+        // Sending unchanged values would enable "custom" limits and pin them at every daemon start.
+        if (pl1, pl2) != *loaded_pl_apply.borrow() {
+            crate::daemon_client::set_power_limits_sync(pl1, pl2);
+            *loaded_pl_apply.borrow_mut() = (pl1, pl2);
+        }
 
         // Only call SetTccOffset when TCC is unlocked and changed (#313)
         if !*tcc_locked_apply.borrow() && tcc != *loaded_tcc_apply.borrow() {
@@ -404,6 +416,10 @@ pub fn build_page() -> gtk::Box {
     let loaded_core_load = loaded_core_mv.clone();
     let loaded_cache_load = loaded_cache_mv.clone();
     let loaded_tcc_load = loaded_tcc.clone();
+    let loaded_pl_load = loaded_pl.clone();
+    let core_unit_load = core_unit.clone();
+    let core_lbl_load = core_lbl.clone();
+    let pwr_group_load = pwr_group.clone();
 
     glib::spawn_future_local(async move {
         // First check CPU lock
@@ -451,14 +467,20 @@ pub fn build_page() -> gtk::Box {
                         badge_load.set_label("RyzenAdj Missing");
                         badge_load.set_css_classes(&["badge-err"]);
                     } else {
-                        warn_desc_clone.set_label("RyzenAdj is managing Curve Optimizer and Power Limits.");
+                        warn_desc_clone.set_label(i18n::t("amd_ryzenadj_ok_desc"));
                         badge_load.set_label("RyzenAdj OK");
                         badge_load.set_css_classes(&["badge-ok"]);
                     }
                     core_scale_range.set_range(-30.0, 30.0);
                     cache_row_clone.set_visible(false);
-                    core_row_clone.set_title("Curve Optimizer (All Core)");
-                    core_row_clone.set_subtitle("Negative values = Undervolt. Range: -30 to +30.");
+                    volt_group_clone.set_title(i18n::t("amd_co_group"));
+                    volt_group_clone.set_description(Some(i18n::t("amd_co_desc")));
+                    core_row_clone.set_title(i18n::t("amd_co_title"));
+                    core_row_clone.set_subtitle(i18n::t("amd_co_sub"));
+                    *core_unit_load.borrow_mut() = "";
+                    core_lbl_load.set_label(&format!("{}", core_scale_range.value() as i32));
+                    // TCC offset is an Intel MSR feature; the daemon has no AMD path for it.
+                    tcc_row_load.set_visible(false);
                 } else {
                     badge_load.set_label("MSR OK");
                     badge_load.set_css_classes(&["badge-ok"]);
@@ -544,13 +566,28 @@ pub fn build_page() -> gtk::Box {
         // Load Power Limits separately
         if let Ok(json) = crate::daemon_client::get_power_profile_raw_async().await {
             if let Ok(state) = serde_json::from_str::<serde_json::Value>(&json) {
+                let amd = state.get("is_amd").and_then(|v| v.as_bool()).unwrap_or(false);
+                if amd {
+                    pwr_group_load.set_title(i18n::t("amd_pl_title"));
+                    pwr_group_load.set_description(Some(i18n::t("amd_pl_desc")));
+                    pl1_row_load.set_title(i18n::t("amd_pl1_label"));
+                    pl2_row_load.set_title(i18n::t("amd_pl2_label"));
+                }
                 if let Some(boot_pl1) = state.get("boot_pl1_w").and_then(|v| v.as_f64()) {
                     *def_pl1_load.borrow_mut() = boot_pl1;
-                    pl1_row_load.set_subtitle(&format!("{} (Boot default: {:.0} W)", i18n::t("pl1_sub"), boot_pl1));
+                    if amd {
+                        pl1_row_load.set_subtitle(&format!("{}: {:.0} W", i18n::t("fw_boot_value"), boot_pl1));
+                    } else {
+                        pl1_row_load.set_subtitle(&format!("{} (Boot default: {:.0} W)", i18n::t("pl1_sub"), boot_pl1));
+                    }
                 }
                 if let Some(boot_pl2) = state.get("boot_pl2_w").and_then(|v| v.as_f64()) {
                     *def_pl2_load.borrow_mut() = boot_pl2;
-                    pl2_row_load.set_subtitle(&format!("{} (Boot default: {:.0} W)", i18n::t("pl2_sub"), boot_pl2));
+                    if amd {
+                        pl2_row_load.set_subtitle(&format!("{}: {:.0} W", i18n::t("fw_boot_value"), boot_pl2));
+                    } else {
+                        pl2_row_load.set_subtitle(&format!("{} (Boot default: {:.0} W)", i18n::t("pl2_sub"), boot_pl2));
+                    }
                 }
                 if let Some(pl1) = state.get("pl1_w").and_then(|v| v.as_f64()) {
                     pl1_s_load.set_value(pl1);
@@ -558,6 +595,8 @@ pub fn build_page() -> gtk::Box {
                 if let Some(pl2) = state.get("pl2_w").and_then(|v| v.as_f64()) {
                     pl2_s_load.set_value(pl2);
                 }
+                // Compare against what the sliders show (they clamp to their range).
+                *loaded_pl_load.borrow_mut() = (pl1_s_load.value() as i32, pl2_s_load.value() as i32);
             }
         }
     });
