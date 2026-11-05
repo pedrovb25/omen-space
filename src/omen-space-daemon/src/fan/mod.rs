@@ -1202,7 +1202,10 @@ impl FanService {
             "performance" => "performance",
             _ => "auto",
         };
-        ec.set_perf_mode(ec_mode);
+        // EC fan-level boards (8C75) get their thermal profile from hp-wmi; skip the raw 0x95 write.
+        if !state.ec_fan_level {
+            ec.set_perf_mode(ec_mode);
+        }
 
         ok
     }

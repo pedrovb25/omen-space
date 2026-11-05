@@ -259,7 +259,11 @@ impl UndervoltService {
     pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let specs = crate::sysmon::get_hardware_specs();
         let is_amd = specs.cpu_spec.to_uppercase().contains("AMD");
-        let voltage_locked = is_cpu_voltage_locked(&specs.cpu_spec);
+        let board_id = std::fs::read_to_string("/sys/class/dmi/id/board_name").unwrap_or_default();
+        let caps = crate::capabilities::detect(board_id.trim(), "", "");
+        // Boards with an entry that disables undervolt (e.g. 8C75: SMU rejects set_coall) are locked.
+        let voltage_locked = is_cpu_voltage_locked(&specs.cpu_spec)
+            || (caps.product_id != "DEFAULT" && !caps.supports_undervolt);
         ensure_msr_module();
         
         let available = if is_amd {
@@ -388,7 +392,19 @@ impl UndervoltService {
 
         if self.is_amd {
             if plane == "core" {
-                let _ = std::process::Command::new("ryzenadj").arg(format!("--set-coall={}", mv)).output();
+                // ryzenadj exits 0 even when the SMU refuses the command; check its output.
+                let accepted = std::process::Command::new("ryzenadj")
+                    .arg(format!("--set-coall={}", mv))
+                    .output()
+                    .map(|o| {
+                        let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+                        o.status.success() && !text.contains("rejected") && !text.contains("not supported")
+                    })
+                    .unwrap_or(false);
+                if !accepted {
+                    warn!("SetOffset: ryzenadj --set-coall={} was rejected", mv);
+                    return "FAIL: Curve Optimizer rejected by the SMU on this CPU/BIOS".to_string();
+                }
             }
         } else {
             let bits = convert_offset(mv);
