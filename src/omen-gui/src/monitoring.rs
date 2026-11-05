@@ -947,7 +947,8 @@ pub fn build_page(is_general: bool) -> gtk::Box {
         if stats.gpu_pwr <= -1.5 {
             gpu_ui.pwr_label.set_label("Idle");
         } else if stats.gpu_pwr < 0.0 {
-            gpu_ui.pwr_label.set_label("D3Cold");
+            // dGPU powered off (PCIe D3cold)
+            gpu_ui.pwr_label.set_label(i18n::t("gpu_asleep"));
         } else {
             gpu_ui.pwr_label.set_label(&format!("{:.1}W", stats.gpu_pwr));
         }

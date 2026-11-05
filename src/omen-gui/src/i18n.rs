@@ -183,6 +183,7 @@ fn translate_tr(key: &'static str) -> &'static str {
         "nav_overlay" => "Hızlı Menü",
         "nav_updater" => "Güncelleme Merkezi",
         "nav_settings" => "Ayarlar",
+        "gpu_asleep" => "Kapalı",
 
         // Titles
         "title_performance" => "Performans",
@@ -616,6 +617,7 @@ fn translate_en(key: &'static str) -> &'static str {
         "nav_overlay" => "Quick Overlay",
         "nav_updater" => "Update Center",
         "nav_settings" => "Settings",
+        "gpu_asleep" => "Off",
 
         // Titles
         "title_performance" => "Performance",
@@ -1051,6 +1053,7 @@ fn translate_es(key: &'static str) -> &'static str {
         "nav_overlay" => "Superposición rápida",
         "nav_updater" => "Centro de actualizaciones",
         "nav_settings" => "Ajustes",
+        "gpu_asleep" => "Apagada",
 
         // Titles
         "title_performance" => "Rendimiento",
