@@ -437,6 +437,72 @@ async fn fetch_power_profile() -> Option<String> {
     None
 }
 
+/// Eco (power-saver) runs the internal panel at its ~60 Hz mode and the other profiles at its
+/// highest refresh rate, at the current resolution. Only the built-in eDP output is touched;
+/// nothing is done when it is already in the wanted mode.
+fn apply_panel_refresh_for_profile(profile: &str) {
+    let Ok(out) = Command::new("kscreen-doctor").arg("-j").output() else { return };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return };
+    let Some(outputs) = json["outputs"].as_array() else { return };
+    let Some(panel) = outputs.iter().find(|o| {
+        o["name"].as_str().is_some_and(|n| n.starts_with("eDP"))
+            && o["connected"].as_bool() == Some(true)
+            && o["enabled"].as_bool() == Some(true)
+    }) else { return };
+    let (Some(name), Some(modes)) = (panel["name"].as_str(), panel["modes"].as_array()) else { return };
+    let current_id = panel["currentModeId"].as_str().unwrap_or_default();
+    let Some(current) = modes.iter().find(|m| m["id"].as_str() == Some(current_id)) else { return };
+    let same_size = modes.iter().filter(|m| m["size"] == current["size"]);
+    let rate = |m: &serde_json::Value| m["refreshRate"].as_f64().unwrap_or(0.0);
+    let target = if profile == "power-saver" {
+        same_size.min_by(|a, b| (rate(a) - 60.0).abs().total_cmp(&(rate(b) - 60.0).abs()))
+    } else {
+        same_size.max_by(|a, b| rate(a).total_cmp(&rate(b)))
+    };
+    let Some(target_id) = target.and_then(|m| m["id"].as_str()) else { return };
+    if target_id != current_id {
+        info!("Power profile {}: switching {} to {:.0} Hz", profile, name, target.map(rate).unwrap_or(0.0));
+        let _ = Command::new("kscreen-doctor").arg(format!("output.{}.mode.{}", name, target_id)).output();
+    }
+}
+
+/// Applies the panel refresh rate for the current power profile, then sleeps until
+/// power-profiles-daemon signals an ActiveProfile change (no polling).
+async fn follow_power_profile_for_panel() {
+    use futures::StreamExt;
+    loop {
+        if let Ok(conn) = Connection::system().await {
+            let proxy = zbus::fdo::PropertiesProxy::builder(&conn)
+                .destination("net.hadess.PowerProfiles")
+                .and_then(|b| b.path("/net/hadess/PowerProfiles"));
+            if let Ok(proxy) = match proxy { Ok(b) => b.build().await, Err(e) => Err(e) } {
+                if let Ok(mut stream) = proxy.receive_properties_changed().await {
+                    let iface = zbus::names::InterfaceName::from_static_str_unchecked("net.hadess.PowerProfiles");
+                    if let Ok(v) = proxy.get(iface, "ActiveProfile").await {
+                        if let Ok(p) = <String>::try_from(v) {
+                            let _ = tokio::task::spawn_blocking(move || apply_panel_refresh_for_profile(&p)).await;
+                        }
+                    }
+                    while let Some(signal) = stream.next().await {
+                        let Ok(args) = signal.args() else { continue };
+                        if args.interface_name() != "net.hadess.PowerProfiles" {
+                            continue;
+                        }
+                        if let Some(v) = args.changed_properties().get("ActiveProfile") {
+                            if let Ok(p) = <&str>::try_from(v) {
+                                let p = p.to_string();
+                                let _ = tokio::task::spawn_blocking(move || apply_panel_refresh_for_profile(&p)).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // power-profiles-daemon unavailable or restarted: retry later.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
 async fn fetch_fan_mode() -> Option<String> {
     if let Ok(conn) = get_conn().await {
         if let Ok(proxy) = FanProxy::new(&conn).await {
@@ -666,6 +732,7 @@ async fn main() {
     wait_for_status_notifier_watcher().await;
 
     let initial_power = fetch_power_profile().await.unwrap_or_else(|| "balanced".into());
+    tokio::spawn(follow_power_profile_for_panel());
     let initial_fan = fetch_fan_mode().await.unwrap_or_else(|| "auto".into());
     let initial_gpu = fetch_gpu_mode().await.unwrap_or_else(|| "hybrid".into());
     let gpu_advanced = fetch_gpu_supports_advanced().await;
