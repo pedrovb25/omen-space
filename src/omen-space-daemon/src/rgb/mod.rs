@@ -721,9 +721,11 @@ impl RgbService {
                         let clamped = new_brightness.clamp(0, 100) as u32;
                         if clamped == 0 {
                             // 0 means off; keep the stored level so turning it back on restores it.
+                            // Not saved: the desktop also sends 0 when the screen turns off, on
+                            // idle and at logout/shutdown, which would leave the keyboard dark at
+                            // the next boot. Explicit "off" from OMEN Space (SetGlobal) still persists.
                             if g.config.power {
                                 g.config.power = false;
-                                g.config.save();
                                 should_apply = true;
                             }
                         } else if g.config.brightness != clamped || !g.config.power {
