@@ -143,6 +143,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Shutdown signal received.");
     fan_service.release_ec_fan_level().await;
 
-    Ok(())
+    // Exit right away: returning would drop the runtime, which waits for blocking reads that
+    // never finish (e.g. the uleds keyboard-backlight listener) until systemd kills us after
+    // TimeoutStopSec, delaying every shutdown and restart.
+    std::process::exit(0);
 }
 
