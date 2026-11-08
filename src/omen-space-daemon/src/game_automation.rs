@@ -65,9 +65,13 @@ impl GameAutomationService {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(10)).await;
+                let game_map = profiles.lock().await.clone();
+                // Listing every process is only needed when some game profile exists.
+                if game_map.is_empty() && active.lock().await.is_none() {
+                    continue;
+                }
                 let running_procs = crate::sysmon::get_running_process_names();
 
-                let game_map = profiles.lock().await.clone();
                 let mut found_game: Option<AppProfile> = None;
 
                 for (proc_name, profile) in game_map {

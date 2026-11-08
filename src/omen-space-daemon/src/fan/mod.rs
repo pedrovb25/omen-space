@@ -628,7 +628,9 @@ impl FanService {
                     &mut warn_hot_since,
                     &mut warn_episode_notified,
                     &mut last_thermal_alert,
-                    DesktopNotifier::are_thermal_alerts_enabled(),
+                    // Only consulted at >= 90°C: reading the user's settings means locating their
+                    // session (a /proc scan), which every 1 s tick made the daemon's main cost.
+                    temp >= 90.0 && DesktopNotifier::are_thermal_alerts_enabled(),
                 ) {
                     let alert_temp = temp as i32;
                     tokio::spawn(async move {
