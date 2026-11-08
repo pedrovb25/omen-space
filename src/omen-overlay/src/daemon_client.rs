@@ -38,6 +38,7 @@ pub fn normalize_fan_mode(mode: &str) -> &'static str {
     match mode.trim().to_lowercase().as_str() {
         "max" | "turbo" | "maksimum" | "máximo" => "max",
         "custom" | "manual" | "curve" | "özel" | "personalizado" => "custom",
+        "quiet" | "silent" | "sessiz" | "silencioso" => "quiet",
         _ => "auto",
     }
 }
@@ -170,6 +171,9 @@ mod tests {
         }
         for s in ["custom", "manual", "curve", "Özel", "Personalizado"] {
             assert_eq!(normalize_fan_mode(s), "custom", "failed for {s}");
+        }
+        for s in ["quiet", "Sessiz", "Silencioso"] {
+            assert_eq!(normalize_fan_mode(s), "quiet", "failed for {s}");
         }
     }
 }

@@ -152,7 +152,46 @@ pub fn build_page() -> gtk::Box {
             crate::daemon_client::set_fan_mode_sync("ec".to_string());
         }
     });
-    fan_header.append(&ec_btn);
+    // EC delegation is rarely useful (on the 8C75 the EC never restarts stopped fans), so it
+    // lives in a small "more" menu instead of the header. The menu button shows "EC" while
+    // that mode is active, since no fan card is selected then.
+    let ec_menu_content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(6).margin_bottom(6).margin_start(6).margin_end(6)
+        .build();
+    ec_menu_content.append(&ec_btn);
+    let board_id = std::fs::read_to_string("/sys/class/dmi/id/board_name").unwrap_or_default();
+    if board_id.trim().eq_ignore_ascii_case("8C75") {
+        ec_menu_content.append(&gtk::Label::builder()
+            .label(i18n::t("ec_board_warning"))
+            .css_classes(["dim-label", "caption"])
+            .wrap(true)
+            .max_width_chars(32)
+            .xalign(0.0)
+            .build());
+    }
+    let ec_popover = gtk::Popover::builder().child(&ec_menu_content).build();
+    let ec_more_inner = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(4).build();
+    ec_more_inner.append(&gtk::Image::builder().icon_name("view-more-symbolic").pixel_size(14).build());
+    let ec_active_lbl = gtk::Label::builder().label("EC").css_classes(["ec-btn-lbl"]).visible(false).build();
+    ec_more_inner.append(&ec_active_lbl);
+    let ec_more = gtk::MenuButton::builder()
+        .child(&ec_more_inner)
+        .popover(&ec_popover)
+        .css_classes(["flat"])
+        .valign(gtk::Align::Center)
+        .tooltip_text(i18n::t("fan_more_options"))
+        .build();
+    {
+        let lbl = ec_active_lbl.clone();
+        let pop = ec_popover.clone();
+        ec_btn.connect_toggled(move |btn| {
+            lbl.set_visible(btn.is_active());
+            if btn.is_active() { pop.popdown(); }
+        });
+    }
+    fan_header.append(&ec_more);
     page.append(&fan_header);
 
     let fan_box = gtk::FlowBox::builder()
@@ -162,9 +201,11 @@ pub fn build_page() -> gtk::Box {
         .column_spacing(12)
         .build();
 
+    let (quiet_btn, quiet_wrap)   = build_fan_chip_card(&crate::asset_resolver::get_asset_path("eco.svg"),         i18n::t("fan_quiet"),  i18n::t("fan_quiet_sub"));
     let (auto_btn, auto_wrap)     = build_fan_chip_card(&crate::asset_resolver::get_asset_path("balanced.svg"),    i18n::t("fan_auto"),   i18n::t("fan_auto_sub"));
     let (max_btn, max_wrap)       = build_fan_chip_card(&crate::asset_resolver::get_asset_path("performance.svg"), i18n::t("fan_max"),    i18n::t("fan_max_sub"));
     let (custom_btn, custom_wrap) = build_fan_chip_card(&crate::asset_resolver::get_asset_path("custom.svg"),      i18n::t("fan_custom"), i18n::t("fan_custom_sub"));
+    quiet_btn.set_tooltip_text(Some(i18n::t("fan_quiet_tooltip")));
     auto_btn.set_tooltip_text(Some(i18n::t("fan_auto_tooltip")));
     max_btn.set_tooltip_text(Some(i18n::t("fan_max_tooltip")));
     custom_btn.set_tooltip_text(Some(i18n::t("fan_custom_tooltip")));
@@ -172,6 +213,8 @@ pub fn build_page() -> gtk::Box {
     let current_fan = crate::daemon_client::get_fan_mode_sync();
     if current_fan == "max" {
         max_btn.set_active(true);
+    } else if current_fan == "quiet" {
+        quiet_btn.set_active(true);
     } else if current_fan == "custom" || current_fan == "manual" {
         custom_btn.set_active(true);
     } else if current_fan == "ec" {
@@ -179,12 +222,15 @@ pub fn build_page() -> gtk::Box {
     } else {
         auto_btn.set_active(true);
     }
+    quiet_btn.set_group(Some(&auto_btn));
     max_btn.set_group(Some(&auto_btn));
     custom_btn.set_group(Some(&auto_btn));
     ec_btn.set_group(Some(&auto_btn));
 
     let u4 = updating_ext.clone();
     auto_btn.connect_toggled(move |btn| { if btn.is_active() && !u4.get() { daemon_client::set_fan_mode_sync("auto".to_string()); } });
+    let u_quiet = updating_ext.clone();
+    quiet_btn.connect_toggled(move |btn| { if btn.is_active() && !u_quiet.get() { daemon_client::set_fan_mode_sync("quiet".to_string()); } });
     let u5 = updating_ext.clone();
     max_btn.connect_toggled(move |btn| { if btn.is_active() && !u5.get() { daemon_client::set_fan_mode_sync("max".to_string()); } });
     let u6 = updating_ext.clone();
@@ -204,6 +250,7 @@ pub fn build_page() -> gtk::Box {
         let eco_c = eco_btn.clone();
         let bal_c = bal_btn.clone();
         let perf_c = perf_btn.clone();
+        let quiet_c = quiet_btn.clone();
         let auto_c = auto_btn.clone();
         let max_c = max_btn.clone();
         let custom_c = custom_btn.clone();
@@ -220,6 +267,7 @@ pub fn build_page() -> gtk::Box {
             let eco_c2 = eco_c.clone();
             let bal_c2 = bal_c.clone();
             let perf_c2 = perf_c.clone();
+            let quiet_c2 = quiet_c.clone();
             let auto_c2 = auto_c.clone();
             let max_c2 = max_c.clone();
             let custom_c2 = custom_c.clone();
@@ -241,6 +289,8 @@ pub fn build_page() -> gtk::Box {
                 let f_lower = f.to_lowercase();
                 if f_lower == "max" {
                     if !max_c2.is_active() { max_c2.set_active(true); }
+                } else if f_lower == "quiet" {
+                    if !quiet_c2.is_active() { quiet_c2.set_active(true); }
                 } else if f_lower == "custom" || f_lower == "manual" {
                     let any_preset_active = p_btns_c2.borrow().iter().any(|b| b.is_active());
                     if !custom_c2.is_active() && !any_preset_active {
@@ -266,6 +316,7 @@ pub fn build_page() -> gtk::Box {
         });
     }
 
+    fan_box.insert(&quiet_wrap, -1);
     fan_box.insert(&auto_wrap, -1);
     fan_box.insert(&max_wrap, -1);
     fan_box.insert(&custom_wrap, -1);

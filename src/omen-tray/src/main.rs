@@ -200,6 +200,7 @@ impl ksni::Tray for Tray {
     fn tool_tip(&self) -> ksni::ToolTip {
         let f_label = match self.fan_mode.as_str() {
             "max" => t("max"),
+            "quiet" => t("quiet"),
             "ec" => t("ec"),
             "custom" => t("custom"),
             _ => t("auto"),
@@ -253,6 +254,18 @@ impl ksni::Tray for Tray {
                 label: t("fan_mode").into(),
                 submenu: vec![
                     CheckmarkItem {
+                        label: t("quiet").into(),
+                        checked: cur_fan == "quiet",
+                        activate: Box::new(|tray: &mut Self| {
+                            tray.fan_mode = "quiet".into();
+                            spawn_task(async {
+                                set_fan_mode("quiet").await;
+                            });
+                        }),
+                        ..Default::default()
+                    }
+                    .into(),
+                    CheckmarkItem {
                         label: t("auto").into(),
                         checked: cur_fan == "auto",
                         activate: Box::new(|tray: &mut Self| {
@@ -271,18 +284,6 @@ impl ksni::Tray for Tray {
                             tray.fan_mode = "max".into();
                             spawn_task(async {
                                 set_fan_mode("max").await;
-                            });
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                    CheckmarkItem {
-                        label: t("ec").into(),
-                        checked: cur_fan == "ec",
-                        activate: Box::new(|tray: &mut Self| {
-                            tray.fan_mode = "ec".into();
-                            spawn_task(async {
-                                set_fan_mode("ec").await;
                             });
                         }),
                         ..Default::default()
