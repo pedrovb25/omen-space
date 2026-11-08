@@ -454,10 +454,20 @@ fn apply_panel_refresh_for_profile(profile: &str) {
     let Some(current) = modes.iter().find(|m| m["id"].as_str() == Some(current_id)) else { return };
     let same_size = modes.iter().filter(|m| m["size"] == current["size"]);
     let rate = |m: &serde_json::Value| m["refreshRate"].as_f64().unwrap_or(0.0);
+    let same_size: Vec<&serde_json::Value> = same_size.collect();
     let target = if profile == "power-saver" {
-        same_size.min_by(|a, b| (rate(a) - 60.0).abs().total_cmp(&(rate(b) - 60.0).abs()))
+        // With amdgpu.freesync_video=1 there are two ~60 Hz modes: the panel's own (full
+        // modeset, ~1 s black) and a VRR variant of the max mode appended after the EDID modes,
+        // which switches with just a flicker. Prefer the later (VRR) one.
+        let id_num = |m: &serde_json::Value| m["id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let best = same_size.iter().map(|m| (rate(m) - 60.0).abs()).fold(f64::INFINITY, f64::min);
+        same_size
+            .iter()
+            .copied()
+            .filter(|m| (rate(m) - 60.0).abs() <= best + 0.5)
+            .max_by_key(|m| id_num(m))
     } else {
-        same_size.max_by(|a, b| rate(a).total_cmp(&rate(b)))
+        same_size.iter().copied().max_by(|a, b| rate(a).total_cmp(&rate(b)))
     };
     let Some(target_id) = target.and_then(|m| m["id"].as_str()) else { return };
     if target_id != current_id {
