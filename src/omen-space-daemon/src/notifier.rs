@@ -10,7 +10,22 @@ pub struct DesktopNotifier;
 
 impl DesktopNotifier {
     /// Discover the active graphical desktop user's session environment `(user, display, dbus_addr, xdg_runtime, home)`.
+    /// Cached for a minute: finding it scans every process's environment.
     fn find_user_session_env() -> Option<(String, String, String, String, String)> {
+        type SessionEnv = Option<(String, String, String, String, String)>;
+        static CACHE: std::sync::Mutex<Option<(std::time::Instant, SessionEnv)>> = std::sync::Mutex::new(None);
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, ref env)) = *cache {
+            if env.is_some() && at.elapsed() < std::time::Duration::from_secs(60) {
+                return env.clone();
+            }
+        }
+        let env = Self::scan_user_session_env();
+        *cache = Some((std::time::Instant::now(), env.clone()));
+        env
+    }
+
+    fn scan_user_session_env() -> Option<(String, String, String, String, String)> {
         let entries = glob("/proc/*/environ").ok()?;
         for entry in entries.flatten() {
             let Ok(content) = std::fs::read(&entry) else { continue };
