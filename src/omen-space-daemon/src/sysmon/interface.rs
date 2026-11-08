@@ -5,6 +5,17 @@ use crate::sysmon::utils::*;
 #[derive(Clone)]
 pub struct SysMonInterface {}
 
+static LAST_TELEMETRY_CLIENT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// True while some window showing live stats (GUI, overlay) has called KeepTelemetry in the
+/// last 10 s; otherwise the periodic TelemetryUpdated computation is skipped.
+pub fn telemetry_wanted() -> bool {
+    LAST_TELEMETRY_CLIENT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10))
+}
+
 impl SysMonInterface {
     pub fn new() -> Self {
         Self {}
@@ -13,6 +24,10 @@ impl SysMonInterface {
 
 #[interface(name = "org.hp.omen.SysMon")]
 impl SysMonInterface {
+    async fn keep_telemetry(&self) {
+        *LAST_TELEMETRY_CLIENT.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+    }
+
     async fn get_diagnostics(&self) -> String {
         let stats = fetch_system_stats();
         serde_json::to_string(&stats).unwrap_or_else(|_| "{}".to_string())

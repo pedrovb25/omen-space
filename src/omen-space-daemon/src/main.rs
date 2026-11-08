@@ -30,7 +30,9 @@ use log::info;
 use std::error::Error;
 use zbus::connection::Builder;
 
-#[tokio::main]
+// Two workers are plenty for the daemon's small tasks (blocking work uses spawn_blocking);
+// one worker per core only multiplied idle wakeups.
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Only the hotkey monitor is promoted to info: its "Detected Hotkey" line is the
     // first thing to check when Shift+F2 / the Omen key does nothing. Everything else
@@ -128,6 +130,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            // Nobody is showing live stats: don't read battery/drives/sensors for nothing.
+            if !sysmon::telemetry_wanted() {
+                continue;
+            }
             let stats = tokio::task::spawn_blocking(sysmon::fetch_system_stats).await.unwrap_or_default();
             let json = serde_json::to_string(&stats).unwrap_or_else(|_| "{}".to_string());
             let _ = sysmon::SysMonInterface::telemetry_updated(&signal_ctx, &json).await;

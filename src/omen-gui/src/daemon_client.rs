@@ -342,6 +342,17 @@ where
 
     if !TELEMETRY_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         let rt = get_runtime();
+        // The daemon only computes live stats while some window keeps asking for them.
+        rt.spawn(async {
+            loop {
+                if let Ok(conn) = get_conn().await {
+                    if let Ok(proxy) = SysMonProxy::new(&conn).await {
+                        let _ = proxy.keep_telemetry().await;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            }
+        });
         rt.spawn(async move {
             use zbus::export::futures_util::StreamExt;
             #[allow(unused_assignments)]

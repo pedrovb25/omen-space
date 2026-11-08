@@ -555,29 +555,33 @@ async fn fetch_gpu_mode() -> Option<String> {
     None
 }
 
+/// Battery line for the tooltip, read straight from sysfs (a few small files) instead of
+/// asking the daemon for full system stats every refresh.
 async fn fetch_battery_info() -> Option<Option<String>> {
-    if let Ok(conn) = get_conn().await {
-        if let Ok(proxy) = SysMonProxy::new(&conn).await {
-            if let Ok(diag_str) = proxy.get_diagnostics().await {
-                if let Ok(stats) = serde_json::from_str::<omen_types::SystemStats>(&diag_str) {
-                    if let Some(ref bat) = stats.battery {
-                        let status_str = match bat.status {
-                            omen_types::BatteryStatus::Charging => t("bat_charging"),
-                            omen_types::BatteryStatus::Discharging => t("bat_discharging"),
-                            omen_types::BatteryStatus::NotCharging => t("bat_not_charging"),
-                            omen_types::BatteryStatus::Full => t("bat_full"),
-                            omen_types::BatteryStatus::Unknown => "...",
-                        };
-                        let health_str = bat.health_pct.map(|h| format!(" · {:.0}% {}", h, t("battery_health"))).unwrap_or_default();
-                        return Some(Some(format!("{}% ({}){}", bat.charge_pct, status_str, health_str)));
-                    } else {
-                        return Some(None);
-                    }
-                }
-            }
-        }
-    }
-    None
+    let read = |dir: &std::path::Path, f: &str| std::fs::read_to_string(dir.join(f)).ok().map(|s| s.trim().to_string());
+    let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") else { return Some(None) };
+    let Some(bat) = entries
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| read(p, "type").as_deref() == Some("Battery") && read(p, "scope").as_deref() != Some("Device"))
+    else {
+        return Some(None);
+    };
+    let charge = read(&bat, "capacity")?;
+    let status_str = match read(&bat, "status").as_deref() {
+        Some("Charging") => t("bat_charging"),
+        Some("Discharging") => t("bat_discharging"),
+        Some("Not charging") => t("bat_not_charging"),
+        Some("Full") => t("bat_full"),
+        _ => "...",
+    };
+    let full = read(&bat, "energy_full").or_else(|| read(&bat, "charge_full")).and_then(|v| v.parse::<f64>().ok());
+    let design = read(&bat, "energy_full_design").or_else(|| read(&bat, "charge_full_design")).and_then(|v| v.parse::<f64>().ok());
+    let health_str = match (full, design) {
+        (Some(f), Some(d)) if d > 0.0 => format!(" · {:.0}% {}", (f / d * 100.0).min(100.0), t("battery_health")),
+        _ => String::new(),
+    };
+    Some(Some(format!("{}% ({}){}", charge, status_str, health_str)))
 }
 
 async fn set_power_profile(profile: &str) {
