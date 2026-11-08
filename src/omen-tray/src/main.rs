@@ -171,7 +171,6 @@ struct Tray {
     gpu_mode: String,
     /// Firmware accepts Advanced Optimus (from Mux.GetGpuInfo supported_modes).
     gpu_advanced: bool,
-    battery_info: Option<String>,
 }
 
 impl ksni::Tray for Tray {
@@ -216,10 +215,7 @@ impl ksni::Tray for Tray {
             "advanced" => t("tt_gpu_advanced"),
             _ => t("tt_gpu_hybrid"),
         };
-        let mut desc = format!("{}: {}\n{}: {}\n{}: {}", t("tt_power"), p_label, t("tt_fan"), f_label, t("tt_gpu"), g_label);
-        if let Some(ref bat) = self.battery_info {
-            desc.push_str(&format!("\n{}: {}", t("tt_battery"), bat));
-        }
+        let desc = format!("{}: {}\n{}: {}\n{}: {}", t("tt_power"), p_label, t("tt_fan"), f_label, t("tt_gpu"), g_label);
         ksni::ToolTip {
             title: "OMEN Space".into(),
             description: desc,
@@ -476,9 +472,9 @@ fn apply_panel_refresh_for_profile(profile: &str) {
     }
 }
 
-/// Applies the panel refresh rate for the current power profile, then sleeps until
-/// power-profiles-daemon signals an ActiveProfile change (no polling).
-async fn follow_power_profile_for_panel() {
+/// Applies the panel refresh rate for the current power profile and mirrors it in the tray,
+/// then sleeps until power-profiles-daemon signals an ActiveProfile change (no polling).
+async fn follow_power_profile(handle: ksni::Handle<Tray>) {
     use futures::StreamExt;
     loop {
         if let Ok(conn) = Connection::system().await {
@@ -501,6 +497,8 @@ async fn follow_power_profile_for_panel() {
                         if let Some(v) = args.changed_properties().get("ActiveProfile") {
                             if let Ok(p) = <&str>::try_from(v) {
                                 let p = p.to_string();
+                                let shown = p.clone();
+                                handle.update(move |tray| tray.power_profile = shown);
                                 let _ = tokio::task::spawn_blocking(move || apply_panel_refresh_for_profile(&p)).await;
                             }
                         }
@@ -553,35 +551,6 @@ async fn fetch_gpu_mode() -> Option<String> {
         }
     }
     None
-}
-
-/// Battery line for the tooltip, read straight from sysfs (a few small files) instead of
-/// asking the daemon for full system stats every refresh.
-async fn fetch_battery_info() -> Option<Option<String>> {
-    let read = |dir: &std::path::Path, f: &str| std::fs::read_to_string(dir.join(f)).ok().map(|s| s.trim().to_string());
-    let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") else { return Some(None) };
-    let Some(bat) = entries
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| read(p, "type").as_deref() == Some("Battery") && read(p, "scope").as_deref() != Some("Device"))
-    else {
-        return Some(None);
-    };
-    let charge = read(&bat, "capacity")?;
-    let status_str = match read(&bat, "status").as_deref() {
-        Some("Charging") => t("bat_charging"),
-        Some("Discharging") => t("bat_discharging"),
-        Some("Not charging") => t("bat_not_charging"),
-        Some("Full") => t("bat_full"),
-        _ => "...",
-    };
-    let full = read(&bat, "energy_full").or_else(|| read(&bat, "charge_full")).and_then(|v| v.parse::<f64>().ok());
-    let design = read(&bat, "energy_full_design").or_else(|| read(&bat, "charge_full_design")).and_then(|v| v.parse::<f64>().ok());
-    let health_str = match (full, design) {
-        (Some(f), Some(d)) if d > 0.0 => format!(" · {:.0}% {}", (f / d * 100.0).min(100.0), t("battery_health")),
-        _ => String::new(),
-    };
-    Some(Some(format!("{}% ({}){}", charge, status_str, health_str)))
 }
 
 async fn set_power_profile(profile: &str) {
@@ -683,7 +652,8 @@ async fn wait_for_status_notifier_watcher() {
     }
 }
 
-#[tokio::main]
+// A tray icon needs no thread pool: one worker keeps idle wakeups down.
+#[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() {
     omen_types::repair_graphical_session_env();
 
@@ -746,18 +716,15 @@ async fn main() {
     wait_for_status_notifier_watcher().await;
 
     let initial_power = fetch_power_profile().await.unwrap_or_else(|| "balanced".into());
-    tokio::spawn(follow_power_profile_for_panel());
     let initial_fan = fetch_fan_mode().await.unwrap_or_else(|| "auto".into());
     let initial_gpu = fetch_gpu_mode().await.unwrap_or_else(|| "hybrid".into());
     let gpu_advanced = fetch_gpu_supports_advanced().await;
-    let initial_bat = fetch_battery_info().await.unwrap_or(None);
 
     let tray = Tray {
         power_profile: initial_power,
         fan_mode: initial_fan,
         gpu_mode: initial_gpu,
         gpu_advanced,
-        battery_info: initial_bat,
     };
 
     let service = ksni::TrayService::new(tray);
@@ -772,28 +739,8 @@ async fn main() {
     })
     .expect("Failed to spawn tray service thread");
 
-    // Main background update loop for refreshing tray tooltip/status states
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let p = fetch_power_profile().await;
-        let f = fetch_fan_mode().await;
-        let g = fetch_gpu_mode().await;
-        let b = fetch_battery_info().await;
-        if p.is_some() || f.is_some() || g.is_some() || b.is_some() {
-            handle.update(|tray| {
-                if let Some(new_p) = p {
-                    tray.power_profile = new_p;
-                }
-                if let Some(new_f) = f {
-                    tray.fan_mode = new_f;
-                }
-                if let Some(new_g) = g {
-                    tray.gpu_mode = new_g;
-                }
-                if let Some(new_b) = b {
-                    tray.battery_info = new_b;
-                }
-            });
-        }
-    }
+    // No polling: the state is read once above, updated by the tray's own actions, and the
+    // power profile follows power-profiles-daemon's change signal (which also sets the panel
+    // refresh rate). Fan/GPU mode changes made elsewhere show up after the next tray restart.
+    follow_power_profile(handle).await;
 }
