@@ -1067,6 +1067,7 @@ impl FanService {
     ///   auto/custom/performance → pwm1_enable=1 (manual), duty set by monitor loop or manual target
     ///   max  → platform_profile=performance, pwm1_enable=0 (full speed)
     async fn set_mode_internal(state: &mut FanState, mode: &str) -> bool {
+        let previous_mode = state.mode.clone();
         // Determine pwm1_enable value (OmenCore mapping)
         let pwm_enable_val = match mode {
             "ec" => 2,       // BIOS hardware control
@@ -1207,6 +1208,14 @@ impl FanService {
         // EC fan-level boards (8C75) get their thermal profile from hp-wmi; skip the raw 0x95 write.
         if !state.ec_fan_level {
             ec.set_perf_mode(ec_mode);
+        }
+
+        // Tell listeners (tray) about real mode changes, from any source: D-Bus calls,
+        // thermal protection, stall kicks, restores. They wait for this instead of polling.
+        if state.mode != previous_mode {
+            if let Some(ctx) = state.signal_ctx.clone() {
+                let _ = Self::fan_mode_changed(&ctx, &state.mode).await;
+            }
         }
 
         ok
@@ -1422,6 +1431,9 @@ impl FanService {
     
     #[zbus(signal)]
     pub async fn thermal_protection_alert(ctxt: &zbus::SignalContext<'_>, active: bool) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn fan_mode_changed(ctxt: &zbus::SignalContext<'_>, mode: &str) -> zbus::Result<()>;
 }
 
 #[cfg(test)]

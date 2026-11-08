@@ -169,6 +169,9 @@ pub trait Fan {
     
     #[zbus(signal)]
     fn thermal_protection_alert(&self, active: bool) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn fan_mode_changed(&self, mode: &str) -> zbus::Result<()>;
 }
 
 // ── SysMon Service Proxy ──────────────────────────────────────────────────────
@@ -233,6 +236,9 @@ pub trait Platform {
 pub trait Mux {
     async fn set_gpu_mode(&self, mode: &str) -> zbus::Result<String>;
     async fn get_gpu_info(&self) -> zbus::Result<String>;
+
+    #[zbus(signal)]
+    fn gpu_mode_changed(&self, mode: &str) -> zbus::Result<()>;
 }
 
 // ── Undervolt Service Proxy ──────────────────────────────────────────────────
