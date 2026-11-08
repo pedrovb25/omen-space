@@ -182,6 +182,9 @@ pub trait SysMon {
     async fn get_hardware_specs(&self) -> zbus::Result<String>;
     async fn generate_diagnostic_report(&self) -> zbus::Result<String>;
     async fn generate_rgb_issue(&self) -> zbus::Result<String>;
+    /// "A window that shows telemetry is open": call every few seconds to keep
+    /// TelemetryUpdated flowing; the daemon stops computing it ~10 s after the last call.
+    async fn keep_telemetry(&self) -> zbus::Result<()>;
     
     #[zbus(signal)]
     fn telemetry_updated(&self, json_stats: &str) -> zbus::Result<()>;

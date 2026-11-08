@@ -6,7 +6,7 @@ pub mod stats;
 pub mod utils;
 pub mod interface;
 
-pub use interface::SysMonInterface;
+pub use interface::{telemetry_wanted, SysMonInterface};
 pub use sensors::*;
 pub use gpu::*;
 pub use stats::*;
