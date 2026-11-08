@@ -454,12 +454,12 @@ async fn follow_fan_mode(handle: ksni::Handle<Tray>) {
             if let Ok(proxy) = FanProxy::new(&conn).await {
                 if let Ok(mut stream) = proxy.receive_fan_mode_changed().await {
                     if let Some(mode) = fetch_fan_mode().await {
-                        handle.update(move |tray| tray.fan_mode = mode);
+                        handle.update(move |tray| tray.fan_mode = mode).await;
                     }
                     while let Some(signal) = stream.next().await {
                         if let Ok(args) = signal.args() {
                             let mode = args.mode().to_string();
-                            handle.update(move |tray| tray.fan_mode = mode);
+                            handle.update(move |tray| tray.fan_mode = mode).await;
                         }
                     }
                 }
@@ -477,12 +477,12 @@ async fn follow_gpu_mode(handle: ksni::Handle<Tray>) {
             if let Ok(proxy) = MuxProxy::new(&conn).await {
                 if let Ok(mut stream) = proxy.receive_gpu_mode_changed().await {
                     if let Some(mode) = fetch_gpu_mode().await {
-                        handle.update(move |tray| tray.gpu_mode = mode);
+                        handle.update(move |tray| tray.gpu_mode = mode).await;
                     }
                     while let Some(signal) = stream.next().await {
                         if let Ok(args) = signal.args() {
                             let mode = args.mode().to_string();
-                            handle.update(move |tray| tray.gpu_mode = mode);
+                            handle.update(move |tray| tray.gpu_mode = mode).await;
                         }
                     }
                 }
@@ -695,21 +695,20 @@ async fn main() {
         gpu_advanced,
     };
 
-    let service = ksni::TrayService::new(tray);
-    let handle = service.handle();
+    // ksni 0.3 runs the StatusNotifierItem service on this tokio runtime and sleeps until
+    // KDE or a handle.update() needs it (0.2 polled its D-Bus connection every 50 ms).
+    use ksni::TrayMethods;
+    let handle = match tray.spawn().await {
+        Ok(handle) => handle,
+        Err(e) => {
+            error!("Failed to start the tray icon: {}", e);
+            return;
+        }
+    };
 
-    // Spawn ksni on a dedicated permanent OS thread so it runs its blocking
-    // event loop indefinitely without blocking the Tokio runtime executor.
-    std::thread::Builder::new()
-    .name("ksni-tray".into())
-    .spawn(move || {
-        service.spawn();
-    })
-    .expect("Failed to spawn tray service thread");
-
-    // No polling: the state is read once above, updated by the tray's own actions, and the
-    // power profile follows power-profiles-daemon's change signal (which also sets the panel
-    // refresh rate). Fan/GPU mode changes made elsewhere show up after the next tray restart.
+    // No polling: the state is read once above and updated by the tray's own actions and by the
+    // daemon's FanModeChanged/GpuModeChanged signals; power-profiles-daemon's change signal
+    // sets the panel refresh rate.
     tokio::spawn(follow_fan_mode(handle.clone()));
     tokio::spawn(follow_gpu_mode(handle));
     follow_power_profile_for_panel().await;
