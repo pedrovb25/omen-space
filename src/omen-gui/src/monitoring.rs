@@ -601,6 +601,7 @@ fn build_modes_card() -> ModesUI {
                     .unwrap_or_else(|_| "auto".to_string());
                 fl.set_label(match fan.as_str() {
                     "max"    => i18n::t("fan_max"),
+                    "quiet"  => i18n::t("fan_quiet"),
                     "manual" | "custom" => i18n::t("fan_custom"),
                     "ec"     => "EC",
                     _        => i18n::t("fan_auto"),

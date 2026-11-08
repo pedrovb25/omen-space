@@ -386,7 +386,7 @@ async fn execute_input_command(input: &str, conn: &zbus::Connection) -> String {
             }
             let sub = parts[1].to_lowercase();
             if let Some(f) = fan {
-                if sub == "auto" || sub == "ec" || sub == "max" || sub == "custom" {
+                if matches!(sub.as_str(), "auto" | "ec" | "max" | "custom" | "quiet") {
                     match f.set_fan_mode(&sub).await {
                         Ok(_) => format!("[{}] \x1b[1;32m{}\x1b[0m", now, crate::i18n::t("fan_changed").replace("{}", &sub.to_uppercase())),
                         Err(e) => format!("[{}] \x1b[1;31m{} {}\x1b[0m", now, crate::i18n::t("fan_error"), e),

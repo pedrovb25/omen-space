@@ -11,6 +11,8 @@ pub enum Language {
     Tr,
     #[serde(rename = "en")]
     En,
+    #[serde(rename = "es")]
+    Es,
 }
 
 
@@ -43,6 +45,9 @@ fn detect_system_language() -> Language {
             if lower.starts_with("tr") || lower.contains("tr_tr") || lower.contains("turkish") {
                 return Language::Tr;
             }
+            if lower.starts_with("es") {
+                return Language::Es;
+            }
         }
     }
     Language::En
@@ -64,6 +69,7 @@ pub fn init() {
                 selected = match cfg.language.as_str() {
                     "tr" => Language::Tr,
                     "en" => Language::En,
+                    "es" => Language::Es,
                     _ => Language::Auto,
                 };
             }
@@ -88,6 +94,7 @@ pub fn t(key: &'static str) -> &'static str {
     let active = get_active_language();
     match active {
         Language::Tr => translate_tr(key),
+        Language::Es => translate_es(key),
         _ => translate_en(key),
     }
 }
@@ -103,6 +110,7 @@ fn translate_tr(key: &'static str) -> &'static str {
         "fan_mode" => "Fan Modu",
         "auto" => "Otomatik",
         "max" => "Maksimum",
+        "quiet" => "Sessiz",
         "ec" => "EC (Donanım)",
         "custom" => "Özel",
         "gpu_mode" => "GPU Modu (Yeniden Başlatma Gerekir)",
@@ -130,6 +138,44 @@ fn translate_tr(key: &'static str) -> &'static str {
     }
 }
 
+fn translate_es(key: &'static str) -> &'static str {
+    match key {
+        "tray_open" => "Abrir OMEN Space",
+        "tray_overlay" => "Panel rápido (Mayús+F2)",
+        "power_profile" => "Perfil de energía",
+        "perf" => "Rendimiento",
+        "balanced" => "Equilibrado",
+        "eco" => "Eco",
+        "fan_mode" => "Ventiladores",
+        "auto" => "Auto",
+        "max" => "Máx",
+        "quiet" => "Silencioso",
+        "ec" => "EC (hardware)",
+        "custom" => "Personalizado",
+        "gpu_mode" => "Modo GPU (requiere reiniciar)",
+        "hybrid" => "Híbrido (requiere reiniciar)",
+        "discrete" => "Solo dGPU (requiere reiniciar)",
+        "advanced" => "Advanced Optimus (requiere reiniciar)",
+        "gpu_reboot_notify" => "Reinicia el equipo para que se aplique el cambio de modo de GPU.",
+        "exit" => "Salir",
+
+        "tt_power" => "Energía",
+        "tt_fan" => "Ventiladores",
+        "tt_gpu" => "GPU",
+        "tt_gpu_hybrid" => "Híbrido",
+        "tt_gpu_discrete" => "Solo dGPU",
+        "tt_gpu_advanced" => "Advanced Optimus",
+        "tt_battery" => "Batería",
+        "battery_health" => "Salud",
+        "bat_charging" => "Cargando",
+        "bat_discharging" => "Descargando",
+        "bat_not_charging" => "No está cargando",
+        "bat_full" => "Cargada",
+
+        _ => translate_en(key),
+    }
+}
+
 fn translate_en(key: &'static str) -> &'static str {
     match key {
         "tray_open" => "Open OMENSpace",
@@ -141,6 +187,7 @@ fn translate_en(key: &'static str) -> &'static str {
         "fan_mode" => "Fan Mode",
         "auto" => "Auto",
         "max" => "Max",
+        "quiet" => "Quiet",
         "ec" => "EC (Hardware)",
         "custom" => "Custom",
         "gpu_mode" => "GPU Mode (Requires Reboot)",

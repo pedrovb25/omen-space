@@ -224,9 +224,10 @@ impl OverlayWindow {
             .build();
 
         let fan_modes = [
-            ("auto", "Q", crate::i18n::t("auto"), "active", "weather-clear-symbolic"),
-            ("max", "W", crate::i18n::t("max"), "active-turbo", "weather-storm-symbolic"),
-            ("custom", "E", crate::i18n::t("custom"), "active", "emblem-system-symbolic"),
+            ("quiet", "Q", crate::i18n::t("fan_quiet"), "active", "weather-few-clouds-symbolic"),
+            ("auto", "W", crate::i18n::t("auto"), "active", "weather-clear-symbolic"),
+            ("max", "E", crate::i18n::t("max"), "active-turbo", "weather-storm-symbolic"),
+            ("custom", "R", crate::i18n::t("custom"), "active", "emblem-system-symbolic"),
         ];
 
         let mut f_btns = Vec::new();
@@ -272,6 +273,7 @@ impl OverlayWindow {
                 .label(&match *mode_key {
                     "auto" => crate::i18n::t("auto_desc"),
                     "max" => crate::i18n::t("max_desc"),
+                    "quiet" => crate::i18n::t("fan_quiet_desc"),
                     _ => crate::i18n::t("custom_desc"),
                 })
                 .css_classes(["mode-desc"])
@@ -438,14 +440,18 @@ impl OverlayWindow {
                     glib::Propagation::Stop
                 }
                 "q" => {
-                    this.select_fan_mode("auto");
+                    this.select_fan_mode("quiet");
                     glib::Propagation::Stop
                 }
                 "w" => {
-                    this.select_fan_mode("max");
+                    this.select_fan_mode("auto");
                     glib::Propagation::Stop
                 }
                 "e" => {
+                    this.select_fan_mode("max");
+                    glib::Propagation::Stop
+                }
+                "r" => {
                     this.select_fan_mode("custom");
                     glib::Propagation::Stop
                 }

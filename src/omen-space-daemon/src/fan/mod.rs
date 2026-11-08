@@ -22,6 +22,17 @@ pub const EC_LEVEL_RAMP_DOWN_PER_TICK: u8 = 3;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CurvePoint(pub f64, pub f64); // [Temp, Pct]
 
+/// "Quiet" fan mode curve (tuned on the 8C75): off below 50 °C, ~2000 RPM in the
+/// high 60s / low 70s under full CPU load, 100% only from 90 °C.
+pub const QUIET_CURVE: [CurvePoint; 6] = [
+    CurvePoint(49.0, 0.0),
+    CurvePoint(50.0, 25.0),
+    CurvePoint(65.0, 35.0),
+    CurvePoint(75.0, 50.0),
+    CurvePoint(85.0, 75.0),
+    CurvePoint(90.0, 100.0),
+];
+
 pub struct FanState {
     pub hwmon_path: Option<PathBuf>,
     pub found_fans: Vec<u32>,
@@ -897,6 +908,15 @@ impl FanService {
 
                     Self::write_pwm_duty(&mut state, desired_pct).await;
                 }
+                "quiet" => {
+                    // Built-in low-noise curve: fans stay off until 50 °C and only go past
+                    // 50% above 75 °C. Same interpolation as Custom, but with a fixed curve so
+                    // the user's own Custom curve is left alone.
+                    let pct = Self::evaluate_spline(&QUIET_CURVE, smoothed_temp);
+                    let target_pct = (pct.round() as u32).clamp(0, 100);
+                    let mut state = self.state.lock().await;
+                    Self::write_pwm_duty(&mut state, target_pct).await;
+                }
                 "custom" => {
                     // If user set a manual percentage (e.g. "fan 50"), re-write
                     // that duty as keep-alive. Don't evaluate any curve.
@@ -1072,7 +1092,7 @@ impl FanService {
         let pwm_enable_val = match mode {
             "ec" => 2,       // BIOS hardware control
             "max" => 0,      // BIOS max hardware speed
-            "auto" | "custom" | "performance" => 1, // Manual/software control
+            "auto" | "custom" | "quiet" | "performance" => 1, // Manual/software control
             _ => return false,
         };
 
@@ -1085,7 +1105,7 @@ impl FanService {
         let caps = crate::capabilities::detect(board_id, "", "");
         
         let only_ec_safe = caps.supports_fan_control_ec && !caps.supports_fan_control_wmi;
-        if only_ec_safe && matches!(mode, "auto" | "custom" | "performance") {
+        if only_ec_safe && matches!(mode, "auto" | "custom" | "quiet" | "performance") {
             warn!("Board {} supports only EC fan control (WMI 0x2E writes proven rejected by BIOS). Forcing EC mode.", board_id);
             // (a) Override mode
             let _ = Box::pin(Self::set_mode_internal(state, "ec")).await;
@@ -1147,7 +1167,7 @@ impl FanService {
             state.last_perf_pct = 0;
             state.auto_fan_activated_at = None;
             // Clear manual target when switching modes
-            if mode == "auto" || mode == "max" || mode == "ec" || mode == "performance" {
+            if matches!(mode, "auto" | "quiet" | "max" | "ec" | "performance") {
                 state.manual_target_pct = None;
             }
             if mode == "max" {
@@ -1172,7 +1192,7 @@ impl FanService {
             state.last_targets.clear();
             state.last_written_duty = None;
             state.last_auto_pct = 0;
-            if mode == "auto" || mode == "max" || mode == "ec" || mode == "performance" {
+            if matches!(mode, "auto" | "quiet" | "max" | "ec" | "performance") {
                 state.manual_target_pct = None;
             }
             if mode == "performance" {
@@ -1537,6 +1557,14 @@ mod tests {
             ticks += 1;
         }
         assert!((20..=60).contains(&ticks), "ramp-down from Max took {} ticks", ticks);
+    }
+
+    #[test]
+    fn test_quiet_curve() {
+        assert_eq!(FanService::evaluate_spline(&QUIET_CURVE, 40.0), 0.0);
+        assert_eq!(FanService::evaluate_spline(&QUIET_CURVE, 50.0), 25.0);
+        assert_eq!(FanService::evaluate_spline(&QUIET_CURVE, 70.0), 42.5);
+        assert_eq!(FanService::evaluate_spline(&QUIET_CURVE, 95.0), 100.0);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use comfy_table::Table;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum FanCommand {
-    /// Set fan mode (auto, max, custom)
+    /// Set fan mode (quiet, auto, max, custom, ec)
     SetMode {
         mode: String,
     },
