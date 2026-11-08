@@ -189,7 +189,11 @@ impl MuxService {
 #[interface(name = "org.hp.omen.Mux")]
 impl MuxService {
     /// SetGpuMode — mirrors Python MUXService.SetGpuMode().
-    async fn set_gpu_mode(&self, mode: String) -> String {
+    async fn set_gpu_mode(
+        &self,
+        mode: String,
+        #[zbus(signal_context)] ctxt: zbus::SignalContext<'_>,
+    ) -> String {
         let valid = ["hybrid", "discrete", "advanced"];
         if !valid.contains(&mode.as_str()) {
             return "FAIL".to_string();
@@ -207,6 +211,7 @@ impl MuxService {
                 g.cached_mode = Some(mode.clone());
             }
             info!("SetGpuMode: '{}' written to WMI sysfs", mode);
+            let _ = Self::gpu_mode_changed(&ctxt, &mode).await;
             "OK_REBOOT_REQUIRED".to_string()
         } else {
             warn!("SetGpuMode: Failed to write to {}", HP_WMI_GRAPHICS_MODE_PATH);
@@ -267,4 +272,8 @@ impl MuxService {
     async fn ping(&self) -> String {
         "OK".to_string()
     }
+
+    /// The selected (pending until reboot) GPU mode changed.
+    #[zbus(signal)]
+    async fn gpu_mode_changed(ctxt: &zbus::SignalContext<'_>, mode: &str) -> zbus::Result<()>;
 }

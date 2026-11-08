@@ -166,7 +166,6 @@ async fn toggle_overlay() {
 
 #[derive(Debug, Clone)]
 struct Tray {
-    power_profile: String,
     fan_mode: String,
     gpu_mode: String,
     /// Firmware accepts Advanced Optimus (from Mux.GetGpuInfo supported_modes).
@@ -199,11 +198,6 @@ impl ksni::Tray for Tray {
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        let p_label = match self.power_profile.as_str() {
-            "performance" => t("perf"),
-            "power-saver" | "eco" => t("eco"),
-            _ => t("balanced"),
-        };
         let f_label = match self.fan_mode.as_str() {
             "max" => t("max"),
             "ec" => t("ec"),
@@ -215,7 +209,8 @@ impl ksni::Tray for Tray {
             "advanced" => t("tt_gpu_advanced"),
             _ => t("tt_gpu_hybrid"),
         };
-        let desc = format!("{}: {}\n{}: {}\n{}: {}", t("tt_power"), p_label, t("tt_fan"), f_label, t("tt_gpu"), g_label);
+        // The power profile is left to the desktop's own battery/power widget.
+        let desc = format!("{}: {}\n{}: {}", t("tt_fan"), f_label, t("tt_gpu"), g_label);
         ksni::ToolTip {
             title: "OMEN Space".into(),
             description: desc,
@@ -229,7 +224,6 @@ impl ksni::Tray for Tray {
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
-        let cur_power = self.power_profile.as_str();
         let cur_fan = self.fan_mode.as_str();
         let cur_gpu = self.gpu_mode.as_str();
 
@@ -255,49 +249,6 @@ impl ksni::Tray for Tray {
             }
             .into(),
             MenuItem::Separator,
-            SubMenu {
-                label: t("power_profile").into(),
-                submenu: vec![
-                    CheckmarkItem {
-                        label: t("perf").into(),
-                        checked: cur_power == "performance",
-                        activate: Box::new(|tray: &mut Self| {
-                            tray.power_profile = "performance".into();
-                            spawn_task(async {
-                                set_power_profile("performance").await;
-                            });
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                    CheckmarkItem {
-                        label: t("balanced").into(),
-                        checked: cur_power == "balanced",
-                        activate: Box::new(|tray: &mut Self| {
-                            tray.power_profile = "balanced".into();
-                            spawn_task(async {
-                                set_power_profile("balanced").await;
-                            });
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                    CheckmarkItem {
-                        label: t("eco").into(),
-                        checked: cur_power == "power-saver" || cur_power == "eco",
-                        activate: Box::new(|tray: &mut Self| {
-                            tray.power_profile = "power-saver".into();
-                            spawn_task(async {
-                                set_power_profile("power-saver").await;
-                            });
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                ],
-                ..Default::default()
-            }
-            .into(),
             SubMenu {
                 label: t("fan_mode").into(),
                 submenu: vec![
@@ -418,21 +369,6 @@ async fn get_conn() -> ZbusResult<Connection> {
     Ok(conn)
 }
 
-async fn fetch_power_profile() -> Option<String> {
-    if let Ok(conn) = get_conn().await {
-        if let Ok(proxy) = PowerProxy::new(&conn).await {
-            if let Ok(json_str) = proxy.get_power_profile().await {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                    if let Some(active) = val.get("active").and_then(|v| v.as_str()) {
-                        return Some(active.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Eco (power-saver) runs the internal panel at its ~60 Hz mode and the other profiles at its
 /// highest refresh rate, at the current resolution. Only the built-in eDP output is touched;
 /// nothing is done when it is already in the wanted mode.
@@ -472,9 +408,9 @@ fn apply_panel_refresh_for_profile(profile: &str) {
     }
 }
 
-/// Applies the panel refresh rate for the current power profile and mirrors it in the tray,
-/// then sleeps until power-profiles-daemon signals an ActiveProfile change (no polling).
-async fn follow_power_profile(handle: ksni::Handle<Tray>) {
+/// Applies the panel refresh rate for the current power profile, then sleeps until
+/// power-profiles-daemon signals an ActiveProfile change (no polling).
+async fn follow_power_profile_for_panel() {
     use futures::StreamExt;
     loop {
         if let Ok(conn) = Connection::system().await {
@@ -497,8 +433,6 @@ async fn follow_power_profile(handle: ksni::Handle<Tray>) {
                         if let Some(v) = args.changed_properties().get("ActiveProfile") {
                             if let Ok(p) = <&str>::try_from(v) {
                                 let p = p.to_string();
-                                let shown = p.clone();
-                                handle.update(move |tray| tray.power_profile = shown);
                                 let _ = tokio::task::spawn_blocking(move || apply_panel_refresh_for_profile(&p)).await;
                             }
                         }
@@ -508,6 +442,53 @@ async fn follow_power_profile(handle: ksni::Handle<Tray>) {
         }
         // power-profiles-daemon unavailable or restarted: retry later.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
+/// Mirrors the daemon's fan mode: one read when (re)connecting, then sleep until the daemon's
+/// FanModeChanged signal. Only retries (every 10 s) while the daemon is unreachable.
+async fn follow_fan_mode(handle: ksni::Handle<Tray>) {
+    use futures::StreamExt;
+    loop {
+        if let Ok(conn) = get_conn().await {
+            if let Ok(proxy) = FanProxy::new(&conn).await {
+                if let Ok(mut stream) = proxy.receive_fan_mode_changed().await {
+                    if let Some(mode) = fetch_fan_mode().await {
+                        handle.update(move |tray| tray.fan_mode = mode);
+                    }
+                    while let Some(signal) = stream.next().await {
+                        if let Ok(args) = signal.args() {
+                            let mode = args.mode().to_string();
+                            handle.update(move |tray| tray.fan_mode = mode);
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+}
+
+/// Mirrors the selected GPU mode the same way, via the daemon's GpuModeChanged signal.
+async fn follow_gpu_mode(handle: ksni::Handle<Tray>) {
+    use futures::StreamExt;
+    loop {
+        if let Ok(conn) = get_conn().await {
+            if let Ok(proxy) = MuxProxy::new(&conn).await {
+                if let Ok(mut stream) = proxy.receive_gpu_mode_changed().await {
+                    if let Some(mode) = fetch_gpu_mode().await {
+                        handle.update(move |tray| tray.gpu_mode = mode);
+                    }
+                    while let Some(signal) = stream.next().await {
+                        if let Ok(args) = signal.args() {
+                            let mode = args.mode().to_string();
+                            handle.update(move |tray| tray.gpu_mode = mode);
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
 }
 
@@ -551,17 +532,6 @@ async fn fetch_gpu_mode() -> Option<String> {
         }
     }
     None
-}
-
-async fn set_power_profile(profile: &str) {
-    if let Ok(conn) = get_conn().await {
-        if let Ok(proxy) = PowerProxy::new(&conn).await {
-            match proxy.set_power_profile(profile).await {
-                Ok(resp) => info!("Güç profili ayarlandı ({}) -> {}", profile, resp),
-                Err(e) => error!("Güç profili değiştirilemedi: {}", e),
-            }
-        }
-    }
 }
 
 async fn set_fan_mode(mode: &str) {
@@ -715,13 +685,11 @@ async fn main() {
     // does not panic on a 1-second D-Bus NoReply timeout during login.
     wait_for_status_notifier_watcher().await;
 
-    let initial_power = fetch_power_profile().await.unwrap_or_else(|| "balanced".into());
     let initial_fan = fetch_fan_mode().await.unwrap_or_else(|| "auto".into());
     let initial_gpu = fetch_gpu_mode().await.unwrap_or_else(|| "hybrid".into());
     let gpu_advanced = fetch_gpu_supports_advanced().await;
 
     let tray = Tray {
-        power_profile: initial_power,
         fan_mode: initial_fan,
         gpu_mode: initial_gpu,
         gpu_advanced,
@@ -742,5 +710,7 @@ async fn main() {
     // No polling: the state is read once above, updated by the tray's own actions, and the
     // power profile follows power-profiles-daemon's change signal (which also sets the panel
     // refresh rate). Fan/GPU mode changes made elsewhere show up after the next tray restart.
-    follow_power_profile(handle).await;
+    tokio::spawn(follow_fan_mode(handle.clone()));
+    tokio::spawn(follow_gpu_mode(handle));
+    follow_power_profile_for_panel().await;
 }
