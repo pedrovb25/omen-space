@@ -1009,14 +1009,15 @@ pub fn build_page(window: &adw::ApplicationWindow) -> gtk::Box {
     // Live DKMS driver status row
     let dkms_loaded = std::path::Path::new("/sys/module/hp_wmi").exists()
         && std::path::Path::new("/sys/module/hp_omen_extra").exists();
+    // use_markup must be off before the texts are set, or "Loaded & Active" fails to parse.
     let dkms_row = adw::ActionRow::builder()
+        .use_markup(false)
         .title(i18n::t("updater_dkms_driver"))
         .subtitle(if dkms_loaded {
             i18n::t("updater_dkms_loaded")
         } else {
             i18n::t("updater_dkms_missing")
         })
-        .use_markup(false)
         .build();
     let dkms_icon = gtk::Image::builder()
         .icon_name(if dkms_loaded {
