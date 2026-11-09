@@ -721,9 +721,13 @@ impl FanService {
                     });
                 }
                 
-                // Thermal Protection Logic ALWAYS uses raw temp for safety
-                if state.thermal_protection_enabled && temp > THERMAL_PROTECTION_TRIGGER_TEMP && !state.thermal_protection_active {
-                    warn!("Temperature exceeded {}°C ({}°C). Activating Thermal Protection Mode (Max Fan).", THERMAL_PROTECTION_TRIGGER_TEMP, temp);
+                // Thermal Protection Logic: requires sustained high load (smoothed_temp >= 91.0 or a raw 99 °C)
+                // so transient 1-second turbo spikes to 96°C do not blast fans at 100% until 82°C
+                // (from upstream v2.2.1, #341 A.4 / #349).
+                let is_sustained_overheat = temp > THERMAL_PROTECTION_TRIGGER_TEMP && (smoothed_temp >= 91.0 || temp >= 99.0);
+                if state.thermal_protection_enabled && is_sustained_overheat && !state.thermal_protection_active {
+                    warn!("Sustained temperature exceeded {}°C (raw: {:.1}°C, smoothed: {:.1}°C). Activating Thermal Protection Mode (Max Fan).",
+                        THERMAL_PROTECTION_TRIGGER_TEMP, temp, smoothed_temp);
                     state.thermal_protection_active = true;
                     state.thermal_protection_entered_at = std::time::Instant::now();
                     state.pre_protection_mode = Some(state.mode.clone());
