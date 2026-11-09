@@ -33,6 +33,35 @@ pub const QUIET_CURVE: [CurvePoint; 6] = [
     CurvePoint(90.0, 100.0),
 ];
 
+/// Auto fan steps (tuned on the 8C75). Tops out at 87% (~3900 rpm, the highest level in
+/// HP's own BIOS fan table) and only goes to 100% from 90 °C.
+pub const AUTO_STEPS: [CurvePoint; 6] = [
+    CurvePoint(0.0, 0.0),
+    CurvePoint(50.0, 40.0),
+    CurvePoint(65.0, 55.0),
+    CurvePoint(75.0, 75.0),
+    CurvePoint(85.0, 87.0),
+    CurvePoint(90.0, 100.0),
+];
+
+/// Auto steps while the power profile is "performance" (and the "performance" fan mode).
+pub const PERF_STEPS: [CurvePoint; 6] = [
+    CurvePoint(0.0, 40.0),
+    CurvePoint(50.0, 55.0),
+    CurvePoint(65.0, 70.0),
+    CurvePoint(75.0, 80.0),
+    CurvePoint(85.0, 87.0),
+    CurvePoint(90.0, 100.0),
+];
+
+/// A step is entered at its temperature but only left once the temperature is this many
+/// degrees below it, so the fans don't flip between two levels around a threshold.
+pub const STEP_DOWN_HYSTERESIS_C: f64 = 6.0;
+
+/// dGPU temperature that forces 100%: the RTX 4070 Laptop throttles itself at ~87 °C,
+/// so it would never reach the 90 °C step on its own.
+pub const GPU_MAX_FAN_TEMP_C: f64 = 84.0;
+
 pub struct FanState {
     pub hwmon_path: Option<PathBuf>,
     pub found_fans: Vec<u32>,
@@ -62,6 +91,7 @@ pub struct FanState {
     pub last_perf_pct: u32,
     pub last_perf_pct_time: std::time::Instant,
     pub last_power_profile_was_perf: bool,
+    pub last_power_profile_was_eco: bool,
     pub last_written_duty: Option<u32>,
     pub last_written_duty_time: Option<std::time::Instant>,
     pub last_hw_detect_attempt: std::time::Instant,
@@ -129,6 +159,7 @@ impl FanService {
             last_perf_pct: 0,
             last_perf_pct_time: std::time::Instant::now(),
             last_power_profile_was_perf: false,
+            last_power_profile_was_eco: false,
             last_written_duty: None,
             last_written_duty_time: None,
             last_hw_detect_attempt: std::time::Instant::now(),
@@ -336,6 +367,35 @@ impl FanService {
         out
     }
 
+    /// Step curve with hysteresis plus the dGPU override. `current` is the level now applied;
+    /// it is kept while it lies between the level for `temp` and the level for
+    /// `temp + STEP_DOWN_HYSTERESIS_C`.
+    pub fn stable_step_pct(steps: &[CurvePoint], temp: f64, gpu_temp: f64, current: u32) -> u32 {
+        let level = |t: f64, gpu: f64| {
+            let gpu_pct = if gpu >= GPU_MAX_FAN_TEMP_C { 100.0 } else { 0.0 };
+            Self::evaluate_step(steps, t).max(gpu_pct).round() as u32
+        };
+        let up = level(temp, gpu_temp);
+        let hold = level(temp + STEP_DOWN_HYSTERESIS_C, gpu_temp + STEP_DOWN_HYSTERESIS_C);
+        current.min(hold).max(up)
+    }
+
+    /// Auto with the Eco power profile: the Quiet curve, the same dGPU override as the
+    /// other Auto curves, and fans that once started keep at least 25% until 44 °C so they
+    /// don't stop and start around the 50 °C threshold.
+    pub fn eco_pct(temp: f64, gpu_temp: f64, current: u32, fan_on: bool) -> u32 {
+        let mut pct = (Self::evaluate_spline(&QUIET_CURVE, temp).round() as u32).clamp(0, 100);
+        if fan_on && temp >= 44.0 {
+            pct = pct.max(25);
+        }
+        if gpu_temp >= GPU_MAX_FAN_TEMP_C
+            || (current == 100 && gpu_temp >= GPU_MAX_FAN_TEMP_C - STEP_DOWN_HYSTERESIS_C)
+        {
+            pct = 100;
+        }
+        pct
+    }
+
     pub fn is_ignored_sensor_device(name: &str, vendor: &str, class: &str) -> bool {
         let name_lower = name.trim().to_lowercase();
         if name_lower.contains("nvidia")
@@ -353,7 +413,8 @@ impl FanService {
         v.eq_ignore_ascii_case("0x10de") && c.starts_with("0x03")
     }
 
-    async fn get_max_temp() -> f64 {
+    /// Returns (hottest sensor, dGPU temperature). The dGPU value is 0.0 while it sleeps.
+    async fn get_max_temp() -> (f64, f64) {
         tokio::task::spawn_blocking(|| {
             let paths = SENSOR_TEMP_PATHS.get_or_init(|| {
                 let mut p = Vec::new();
@@ -395,10 +456,10 @@ impl FanService {
                 max_temp = gpu_temp;
             }
 
-            max_temp
+            (max_temp, if gpu_temp < 150.0 { gpu_temp } else { 0.0 })
         })
         .await
-        .unwrap_or(45.0)
+        .unwrap_or((45.0, 0.0))
     }
 
     /// Convert a percentage (0-100) to a PWM duty cycle value (0-255)
@@ -538,7 +599,7 @@ impl FanService {
                 }
             }
             
-            let temp = Self::get_max_temp().await;
+            let (temp, gpu_temp) = Self::get_max_temp().await;
             
             // 5-second Simple Moving Average (SMA) as requested by user
             let smoothed_temp = {
@@ -791,49 +852,49 @@ impl FanService {
                             .unwrap_or(false)
                     };
 
-                    if state.last_power_profile_was_perf != is_performance_power {
+                    // Eco power profile: Auto follows the Quiet curve.
+                    let is_eco_power = !is_performance_power && {
+                        let pp_path = "/sys/firmware/acpi/platform_profile";
+                        let hp_path = "/sys/devices/platform/hp-wmi/platform_profile";
+                        let is_eco_name = |s: &str| matches!(s, "low-power" | "quiet" | "cool" | "power-saver");
+                        let sysfs_eco = std::fs::read_to_string(pp_path)
+                            .or_else(|_| std::fs::read_to_string(hp_path))
+                            .map(|val| is_eco_name(val.trim()))
+                            .unwrap_or(false);
+                        sysfs_eco || std::fs::read_to_string("/etc/omen-space/power.json")
+                            .ok()
+                            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+                            .and_then(|v| v.get("power_profile").and_then(|p| p.as_str().map(is_eco_name)))
+                            .unwrap_or(false)
+                    };
+
+                    if state.last_power_profile_was_perf != is_performance_power
+                        || state.last_power_profile_was_eco != is_eco_power
+                    {
                         state.last_power_profile_was_perf = is_performance_power;
+                        state.last_power_profile_was_eco = is_eco_power;
                         // Reset hysteresis when power profile changes so fan adapts instantly
                         state.last_auto_pct = 0;
                         state.auto_fan_activated_at = None;
                     }
 
+                    let last_pct = state.last_auto_pct;
                     let mut desired_pct = if is_performance_power {
-                        // Step-based aggressive curve for stability
-                        let perf_curve = vec![
-                            CurvePoint(0.0,  40.0),
-                            CurvePoint(50.0, 55.0),
-                            CurvePoint(60.0, 75.0),
-                            CurvePoint(75.0, 85.0),
-                            CurvePoint(85.0, 100.0),
-                        ];
                         // When in performance power mode, we don't turn off the fans.
-                        Self::evaluate_step(&perf_curve, smoothed_temp).round() as u32
-                    } else {
-                        // Standard Auto curve (Step-based)
-                        let auto_curve = vec![
-                            CurvePoint(0.0,  0.0),   
-                            CurvePoint(50.0, 40.0),  
-                            CurvePoint(60.0, 55.0),
-                            CurvePoint(75.0, 75.0),
-                            CurvePoint(85.0, 100.0),
-                        ];
-
-                        if !is_fan_on {
-                            if smoothed_temp >= 52.0 {
-                                let pct = Self::evaluate_step(&auto_curve, smoothed_temp);
-                                pct.round() as u32
-                            } else {
-                                0
-                            }
+                        Self::stable_step_pct(&PERF_STEPS, smoothed_temp, gpu_temp, last_pct)
+                    } else if is_eco_power {
+                        Self::eco_pct(smoothed_temp, gpu_temp, last_pct, is_fan_on)
+                    } else if !is_fan_on {
+                        if smoothed_temp >= 52.0 {
+                            Self::stable_step_pct(&AUTO_STEPS, smoothed_temp, gpu_temp, last_pct)
                         } else {
-                            if smoothed_temp < 43.0 {
-                                0
-                            } else {
-                                let pct = Self::evaluate_step(&auto_curve, smoothed_temp);
-                                (pct.round() as u32).max(40) // Enforce minimum fan speed while ON
-                            }
+                            0
                         }
+                    } else if smoothed_temp < 43.0 {
+                        0
+                    } else {
+                        // Enforce minimum fan speed while ON
+                        Self::stable_step_pct(&AUTO_STEPS, smoothed_temp, gpu_temp, last_pct).max(40)
                     };
 
                     // 1. Peak Holding
@@ -851,7 +912,11 @@ impl FanService {
                     }
 
                     // 2. Minimum Runtime (AUTO_PEAK_HOLD_SECS)
-                    if desired_pct == 0 {
+                    if desired_pct == 0 && is_eco_power {
+                        // Eco: the peak hold above already kept the fans on for a while.
+                        state.auto_fan_activated_at = None;
+                        state.last_auto_pct = 0;
+                    } else if desired_pct == 0 {
                         if let Some(turned_on_at) = state.auto_fan_activated_at {
                             if turned_on_at.elapsed().as_secs() < AUTO_PEAK_HOLD_SECS {
                                 desired_pct = 38;
@@ -881,18 +946,13 @@ impl FanService {
                         continue;
                     }
 
-                    // Step-based aggressive curve for stability
-                    let perf_curve = vec![
-                        CurvePoint(0.0,  40.0),
-                        CurvePoint(50.0, 55.0),
-                        CurvePoint(60.0, 75.0),
-                        CurvePoint(75.0, 85.0),
-                        CurvePoint(85.0, 100.0),
-                    ];
-                    
-                    let mut desired_pct = Self::evaluate_step(&perf_curve, smoothed_temp).round() as u32;
-
                     let mut state = self.state.lock().await;
+                    let mut desired_pct = Self::stable_step_pct(
+                        &PERF_STEPS,
+                        smoothed_temp,
+                        gpu_temp,
+                        state.last_perf_pct,
+                    );
 
                     // Peak Holding specific to performance mode
                     if desired_pct > state.last_perf_pct {
@@ -1565,6 +1625,41 @@ mod tests {
         assert_eq!(FanService::evaluate_spline(&QUIET_CURVE, 50.0), 25.0);
         assert_eq!(FanService::evaluate_spline(&QUIET_CURVE, 70.0), 42.5);
         assert_eq!(FanService::evaluate_spline(&QUIET_CURVE, 95.0), 100.0);
+    }
+
+    #[test]
+    fn test_stable_step_pct() {
+        let s = |t, gpu, cur| FanService::stable_step_pct(&AUTO_STEPS, t, gpu, cur);
+        // Rising: level follows the step for the temperature.
+        assert_eq!(s(76.0, 0.0, 55), 75);
+        assert_eq!(s(86.0, 0.0, 75), 87);
+        assert_eq!(s(89.9, 0.0, 87), 87);
+        assert_eq!(s(90.0, 0.0, 87), 100);
+        // Falling: keeps the level until 6 °C below its threshold.
+        assert_eq!(s(70.0, 0.0, 75), 75);
+        assert_eq!(s(68.9, 0.0, 75), 55);
+        assert_eq!(s(85.0, 0.0, 100), 100);
+        assert_eq!(s(83.9, 0.0, 100), 87);
+        // dGPU override from 84 °C, released below 78 °C.
+        assert_eq!(s(84.0, 84.0, 75), 100);
+        assert_eq!(s(79.0, 79.0, 100), 100);
+        assert_eq!(s(77.9, 77.9, 100), 75);
+        // Performance steps never stop the fans.
+        assert_eq!(FanService::stable_step_pct(&PERF_STEPS, 30.0, 0.0, 0), 40);
+    }
+
+    #[test]
+    fn test_eco_pct() {
+        // Off when cool, Quiet curve when warm.
+        assert_eq!(FanService::eco_pct(40.0, 0.0, 0, false), 0);
+        assert_eq!(FanService::eco_pct(70.0, 0.0, 0, true), 43);
+        // Once on, stays at 25% down to 44 °C.
+        assert_eq!(FanService::eco_pct(46.0, 0.0, 25, true), 25);
+        assert_eq!(FanService::eco_pct(43.9, 0.0, 25, true), 0);
+        // dGPU override from 84 °C, released below 78 °C.
+        assert_eq!(FanService::eco_pct(84.0, 84.0, 75, true), 100);
+        assert_eq!(FanService::eco_pct(79.0, 79.0, 100, true), 100);
+        assert_eq!(FanService::eco_pct(77.9, 77.9, 100, true), 57);
     }
 
     #[test]
