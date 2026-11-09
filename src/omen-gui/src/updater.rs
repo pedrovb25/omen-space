@@ -15,6 +15,10 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const COMPILED_GIT_SHA: &str = env!("OMEN_GIT_SHA");
 const COMPILED_GIT_SHORT_SHA: &str = env!("OMEN_GIT_SHORT_SHA");
 const REPO_OWNER_NAME: &str = "yunusemreyl/omen-space";
+/// This build is a personal fork: upstream releases up to this one have already been reviewed
+/// and their useful fixes merged, so only a newer upstream release counts as an update.
+/// Upstream commits are not compared (the fork's commits are not on upstream main).
+const REVIEWED_UPSTREAM_VERSION: &str = "2.2.1";
 
 #[derive(Debug, Clone)]
 struct RemoteUpdateCheck {
@@ -130,7 +134,7 @@ async fn curl_fetch(url: &str) -> Result<String, String> {
 }
 
 async fn check_github_updates_async() -> RemoteUpdateCheck {
-    let (installed_ver, installed_sha, installed_short) = resolve_installed_build();
+    let (installed_ver, _installed_sha, installed_short) = resolve_installed_build();
 
     let commit_url = format!(
         "https://api.github.com/repos/{}/commits/main",
@@ -196,14 +200,12 @@ async fn check_github_updates_async() -> RemoteUpdateCheck {
         }
     }
 
-    let mut remote_sha = "unknown".to_string();
     let mut remote_short = "unknown".to_string();
     let mut head_msg = String::new();
 
     if let Ok(c_str) = commit_res {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&c_str) {
             if let Some(sha) = v["sha"].as_str() {
-                remote_sha = sha.to_string();
                 remote_short = sha.chars().take(7).collect();
             }
             if let Some(msg) = v["commit"]["message"].as_str() {
@@ -212,62 +214,20 @@ async fn check_github_updates_async() -> RemoteUpdateCheck {
         }
     }
 
-    let mut commits_ahead = 0u32;
-    let mut commit_list = Vec::new();
+    // Personal fork: upstream commits are not compared (the fork's commits are not on
+    // upstream main); only an upstream release newer than REVIEWED_UPSTREAM_VERSION counts.
+    let commits_ahead = 0u32;
+    let baseline = if is_newer_semver(&installed_ver, REVIEWED_UPSTREAM_VERSION) {
+        REVIEWED_UPSTREAM_VERSION
+    } else {
+        installed_ver.as_str()
+    };
+    let update_available = is_newer_semver(baseline, &remote_ver);
 
-    if installed_sha != "unknown"
-        && remote_sha != "unknown"
-        && installed_sha != remote_sha
-    {
-        let cmp_url = format!(
-            "https://api.github.com/repos/{}/compare/{}...main",
-            REPO_OWNER_NAME, installed_sha
-        );
-        if let Ok(cmp_str) = curl_fetch(&cmp_url).await {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cmp_str) {
-                let status = v["status"].as_str().unwrap_or("");
-                commits_ahead = v["ahead_by"].as_u64().unwrap_or(0) as u32;
-                if status == "diverged" && commits_ahead == 0 {
-                    commits_ahead = 1;
-                }
-                if let Some(arr) = v["commits"].as_array() {
-                    for c in arr.iter().rev().take(20) {
-                        let sha_s: String = c["sha"]
-                            .as_str()
-                            .unwrap_or("")
-                            .chars()
-                            .take(7)
-                            .collect();
-                        let msg_s = c["commit"]["message"]
-                            .as_str()
-                            .unwrap_or("")
-                            .lines()
-                            .next()
-                            .unwrap_or("");
-                        if !msg_s.is_empty() {
-                            commit_list.push(format!("• [{}] {}", sha_s, msg_s));
-                        }
-                    }
-                }
-            }
-        } else {
-            commits_ahead = 1;
-        }
-    }
-
-    let ver_newer = is_newer_semver(&installed_ver, &remote_ver);
-    let sha_newer = installed_sha != "unknown"
-        && remote_sha != "unknown"
-        && installed_sha != remote_sha
-        && commits_ahead > 0;
-    let update_available = ver_newer || sha_newer;
-
-    let changelog = if !commit_list.is_empty() {
-        commit_list.join("\n")
-    } else if !head_msg.is_empty() && (sha_newer || release_notes.is_empty()) {
-        format!("• [{}] {}", remote_short, head_msg)
-    } else if !release_notes.is_empty() {
+    let changelog = if !release_notes.is_empty() {
         release_notes
+    } else if !head_msg.is_empty() {
+        format!("• [{}] {}", remote_short, head_msg)
     } else {
         i18n::t("no_release_notes").to_string()
     };
@@ -356,12 +316,12 @@ pub fn build_page(window: &adw::ApplicationWindow) -> gtk::Box {
 
     // Live Update Status Row
     let status_row = adw::ActionRow::builder()
-        .title(i18n::t("checking_updates_title"))
-        .subtitle(i18n::t("updater_checking_sub"))
+        .title(i18n::t("updater_manual_title"))
+        .subtitle(i18n::t("updater_manual_sub"))
         .use_markup(false)
         .build();
     let status_icon = gtk::Image::builder()
-        .icon_name("emblem-synchronizing-symbolic")
+        .icon_name("view-refresh-symbolic")
         .pixel_size(24)
         .margin_end(12)
         .build();
@@ -391,7 +351,8 @@ pub fn build_page(window: &adw::ApplicationWindow) -> gtk::Box {
         .valign(gtk::Align::Center)
         .visible(false)
         .build();
-    action_box.append(&reinstall_btn);
+    // Personal fork: "Reinstall" and "Update now" would install upstream over it, so they are
+    // never shown (not added to the page).
 
     let update_now_btn = gtk::Button::builder()
         .label(i18n::t("updater_update_now_btn"))
@@ -399,7 +360,6 @@ pub fn build_page(window: &adw::ApplicationWindow) -> gtk::Box {
         .valign(gtk::Align::Center)
         .visible(false)
         .build();
-    action_box.append(&update_now_btn);
 
     status_row.add_suffix(&action_box);
     app_group.add(&status_row);
@@ -991,13 +951,7 @@ pub fn build_page(window: &adw::ApplicationWindow) -> gtk::Box {
         retry_btn.connect_clicked(move |_| ru());
     }
 
-    // Trigger initial non-blocking update check automatically
-    {
-        let rc = run_check.clone();
-        glib::idle_add_local_once(move || {
-            rc();
-        });
-    }
+    // No automatic check: updates are only looked up when the user presses the button.
 
     // ── 3. Firmware & Kernel Driver Group ────────────────────
     let specs = crate::daemon_client::get_hardware_specs_sync();

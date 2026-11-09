@@ -56,17 +56,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let _ = std::process::Command::new("modprobe").arg("hp_wmi").output();
     }
 
-    // Spawn background BIOS update checker (staggered at 10s)
-    tokio::spawn(async {
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-        let _ = bios_checker::BiosUpdateChecker::check_for_updates().await;
-    });
-
-    // Spawn background application auto-update checker (staggered at 20s)
-    tokio::spawn(async {
-        tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
-        let _ = auto_updater::AutoUpdateService::check_for_updates().await;
-    });
+    // No background application update check: it only runs when asked (CheckAppUpdate).
 
     let game_auto = game_automation::GameAutomationService::new();
     game_auto.start_monitor();

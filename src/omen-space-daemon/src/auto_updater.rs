@@ -6,6 +6,8 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const COMPILED_GIT_SHA: &str = env!("OMEN_GIT_SHA");
 pub const COMPILED_GIT_SHORT_SHA: &str = env!("OMEN_GIT_SHORT_SHA");
 pub const REPO_OWNER_NAME: &str = "yunusemreyl/omen-space";
+/// Last upstream release reviewed for this fork; only newer releases count as updates.
+pub const REVIEWED_UPSTREAM_VERSION: &str = "2.2.1";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppUpdateInfo {
@@ -65,11 +67,16 @@ impl AutoUpdateService {
             download_url,
         ) = fetch_github_update_metadata(&installed_sha).await;
 
-        let semver_newer = is_newer_semver(CURRENT_VERSION, &latest_version);
-        let commit_newer = installed_sha != "unknown"
-            && latest_sha != "unknown"
-            && installed_sha != latest_sha
-            && commits_behind > 0;
+        // Personal fork: upstream releases up to REVIEWED_UPSTREAM_VERSION are already reviewed,
+        // and upstream commits are not compared (the fork's commits are not on upstream main).
+        let baseline = if is_newer_semver(CURRENT_VERSION, REVIEWED_UPSTREAM_VERSION) {
+            REVIEWED_UPSTREAM_VERSION
+        } else {
+            CURRENT_VERSION
+        };
+        let semver_newer = is_newer_semver(baseline, &latest_version);
+        let commit_newer = false;
+        let _ = (&latest_sha, commits_behind);
 
         let update_available = semver_newer || commit_newer;
 
@@ -121,6 +128,7 @@ impl AutoUpdateService {
         }
     }
 
+    #[allow(dead_code)] // disabled: see Platform::apply_app_update
     pub async fn apply_update() -> String {
         info!("Starting Omen Space application update...");
         let info = Self::check_for_updates().await;

@@ -590,8 +590,9 @@ impl PlatformService {
     }
 
     /// ApplyAppUpdate — Downloads and installs the latest Omen Space application update.
+    /// Disabled on this personal fork: installing upstream would overwrite its changes.
     async fn apply_app_update(&self) -> String {
-        crate::auto_updater::AutoUpdateService::apply_update().await
+        "Automatic update is disabled on this build (personal fork): review upstream releases and port changes by hand.".to_string()
     }
 
     /// ToggleOverlay — Requests the UI/overlay process to toggle visibility.
