@@ -90,6 +90,29 @@ fn spawn_gui() {
     }
 }
 
+/// Icon click: close the window if it is open, otherwise open it.
+/// The GUI quits when its window closes, so its D-Bus name only exists while the window is
+/// open: asking it to run its "close-window" action fails exactly when there is no window.
+fn toggle_gui() {
+    let closed = Command::new("gdbus")
+        .args([
+            "call", "--session", "--timeout", "2",
+            "--dest", "org.hp.OmenSpace",
+            "--object-path", "/org/hp/OmenSpace",
+            "--method", "org.gtk.Actions.Activate",
+            "close-window", "[]", "{}",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !closed {
+        spawn_gui();
+    }
+}
+
 /// Serialises overlay toggles so a tray-menu click and a hotkey signal that arrive
 /// together cannot both decide "not running" and start two HUDs.
 static OVERLAY_TOGGLE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -221,7 +244,7 @@ impl ksni::Tray for Tray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        spawn_gui();
+        std::thread::spawn(toggle_gui);
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {

@@ -477,6 +477,13 @@ pub async fn get_power_profile_async() -> Result<String, Box<dyn std::error::Err
     Ok(res)
 }
 
+/// Live AMD STAPM/PPT limits (JSON, "{}" when unreadable). Only for the power page load.
+pub async fn get_amd_power_limits_async() -> Result<String, Box<dyn std::error::Error>> {
+    let conn = get_conn().await?;
+    let proxy = PowerProxy::new(&conn).await?;
+    Ok(proxy.get_amd_power_limits().await?)
+}
+
 pub async fn get_power_profile_raw_async() -> Result<String, Box<dyn std::error::Error>> {
     let conn = get_conn().await?;
     let proxy = PowerProxy::new(&conn).await?;
