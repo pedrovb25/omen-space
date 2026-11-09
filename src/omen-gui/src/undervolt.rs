@@ -393,6 +393,8 @@ pub fn build_page() -> gtk::Box {
     let cache_s_load = cache_scale.clone();
     let pl1_s_load = pl1_scale.clone();
     let pl2_s_load = pl2_scale.clone();
+    let pl1_lbl_load = pl1_lbl.clone();
+    let pl2_lbl_load = pl2_lbl.clone();
     let tcc_s_load = tcc_scale.clone();
     let tcc_lbl_load = tcc_lbl.clone();
     let tcc_row_load = tcc_row.clone();
@@ -576,11 +578,17 @@ pub fn build_page() -> gtk::Box {
                     pwr_group_load.set_description(Some(i18n::t("amd_pl_desc")));
                     pl1_row_load.set_title(i18n::t("amd_pl1_label"));
                     pl2_row_load.set_title(i18n::t("amd_pl2_label"));
-                    // AMD limits can't be read back, so say who is in charge instead of a value.
+                    // Live values are filled in when the page is shown (see connect_map below).
                     let custom = state.get("pl_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
                     let note = i18n::t(if custom { "amd_pl_custom" } else { "amd_pl_firmware" });
                     pl1_row_load.set_subtitle(note);
                     pl2_row_load.set_subtitle(note);
+                    // The firmware resets STAPM/PPT on every power profile change, so on AMD the
+                    // limits are shown for information only: no sliders, nothing to apply.
+                    pl1_s_load.set_visible(false);
+                    pl2_s_load.set_visible(false);
+                    pl1_lbl_load.set_label("—");
+                    pl2_lbl_load.set_label("—");
                 }
                 if let Some(boot_pl1) = state.get("boot_pl1_w").and_then(|v| v.as_f64()) {
                     *def_pl1_load.borrow_mut() = boot_pl1;
@@ -590,17 +598,64 @@ pub fn build_page() -> gtk::Box {
                     *def_pl2_load.borrow_mut() = boot_pl2;
                     pl2_row_load.set_subtitle(&format!("{} (Boot default: {:.0} W)", i18n::t("pl2_sub"), boot_pl2));
                 }
-                if let Some(pl1) = state.get("pl1_w").and_then(|v| v.as_f64()) {
-                    pl1_s_load.set_value(pl1);
-                }
-                if let Some(pl2) = state.get("pl2_w").and_then(|v| v.as_f64()) {
-                    pl2_s_load.set_value(pl2);
+                if !amd {
+                    if let Some(pl1) = state.get("pl1_w").and_then(|v| v.as_f64()) {
+                        pl1_s_load.set_value(pl1);
+                    }
+                    if let Some(pl2) = state.get("pl2_w").and_then(|v| v.as_f64()) {
+                        pl2_s_load.set_value(pl2);
+                    }
                 }
                 // Compare against what the sliders show (they clamp to their range).
                 *loaded_pl_load.borrow_mut() = (pl1_s_load.value() as i32, pl2_s_load.value() as i32);
             }
         }
     });
+
+    // AMD: the firmware sets different STAPM/PPT limits for each power profile, so read the
+    // live ones every time the page is shown (one read per visit, no polling).
+    {
+        let pl1_row = pl1_row.clone();
+        let pl2_row = pl2_row.clone();
+        let pl1_scale = pl1_scale.clone();
+        let pl2_scale = pl2_scale.clone();
+        let pl1_lbl = pl1_lbl.clone();
+        let pl2_lbl = pl2_lbl.clone();
+        let loaded_pl = loaded_pl.clone();
+        page.connect_map(move |_| {
+            let pl1_lbl = pl1_lbl.clone();
+            let pl2_lbl = pl2_lbl.clone();
+            let pl1_row = pl1_row.clone();
+            let pl2_row = pl2_row.clone();
+            let pl1_scale = pl1_scale.clone();
+            let pl2_scale = pl2_scale.clone();
+            let loaded_pl = loaded_pl.clone();
+            glib::spawn_future_local(async move {
+                let Ok(json) = crate::daemon_client::get_power_profile_raw_async().await else { return };
+                let Ok(state) = serde_json::from_str::<serde_json::Value>(&json) else { return };
+                if !state.get("is_amd").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    return;
+                }
+                let custom = state.get("pl_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                let Ok(lj) = crate::daemon_client::get_amd_power_limits_async().await else { return };
+                let Ok(l) = serde_json::from_str::<serde_json::Value>(&lj) else { return };
+                let (Some(spl), Some(sppt), Some(fppt)) =
+                    (l["spl_w"].as_f64(), l["sppt_w"].as_f64(), l["fppt_w"].as_f64())
+                else {
+                    return;
+                };
+                let src = i18n::t(if custom { "amd_pl_custom" } else { "amd_pl_live" });
+                pl1_row.set_subtitle(&format!("{}: STAPM {:.0} W · PPT slow {:.0} W", src, spl, sppt));
+                pl2_row.set_subtitle(&format!("{}: PPT fast {:.0} W", src, fppt));
+                // Sustained power is capped by whichever of STAPM / slow PPT is lower.
+                pl1_scale.set_value(spl.min(sppt));
+                pl2_scale.set_value(fppt);
+                pl1_lbl.set_label(&format!("{:.0} W", spl.min(sppt)));
+                pl2_lbl.set_label(&format!("{:.0} W", fppt));
+                *loaded_pl.borrow_mut() = (pl1_scale.value() as i32, pl2_scale.value() as i32);
+            });
+        });
+    }
 
     page
 }

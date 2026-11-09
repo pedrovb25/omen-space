@@ -150,6 +150,20 @@ impl PowerService {
     /// either: `ryzenadj -i` needs the PM table (ryzen_smu or relaxed /dev/mem, both missing
     /// on stock Fedora kernels) and polling it sends SMU commands concurrently with the
     /// kernel's own SMU users, which is unsafe.
+    /// Parses amd-pmf's `current_power_limits` ("spl:65000 fppt:65000 sppt:60000 ...", mW)
+    /// into whole watts (spl, sppt, fppt).
+    fn parse_amd_pmf_limits(text: &str) -> Option<(u32, u32, u32)> {
+        let get = |key: &str| -> Option<u32> {
+            text.split_whitespace()
+                .filter_map(|tok| tok.split_once(':'))
+                .find(|(k, _)| *k == key)
+                .and_then(|(_, v)| v.parse::<u32>().ok())
+                .map(|mw| (mw + 500) / 1000)
+                .filter(|w| (5..=250).contains(w))
+        };
+        Some((get("spl")?, get("sppt")?, get("fppt")?))
+    }
+
     fn is_amd_cpu() -> bool {
         std::fs::read_to_string("/proc/cpuinfo")
             .map(|s| s.contains("AuthenticAMD"))
@@ -779,6 +793,28 @@ impl PowerService {
 #[interface(name = "org.hp.omen.Power")]
 impl PowerService {
 
+    /// GetAmdPowerLimits — live STAPM / slow PPT / fast PPT limits in W, read from the kernel's
+    /// amd-pmf driver (debugfs, root only). The driver asks the PMFW through its own locked
+    /// mailbox, so this is safe, but it is a separate method so only the power page calls it
+    /// (once, when it loads) instead of every GetPowerProfile poll. Returns "{}" if unreadable.
+    async fn get_amd_power_limits(&self) -> String {
+        if !Self::is_amd_cpu() {
+            return "{}".to_string();
+        }
+        let text = tokio::fs::read_to_string("/sys/kernel/debug/amd_pmf/current_power_limits")
+            .await
+            .unwrap_or_default();
+        match Self::parse_amd_pmf_limits(&text) {
+            Some((spl, sppt, fppt)) => serde_json::json!({
+                "spl_w": spl,
+                "sppt_w": sppt,
+                "fppt_w": fppt,
+            })
+            .to_string(),
+            None => "{}".to_string(),
+        }
+    }
+
     /// GetPowerProfile — returns JSON matching Python GetPowerProfile().
     async fn get_power_profile(&self) -> String {
         let cfg = self.config.lock().await.clone();
@@ -969,5 +1005,18 @@ impl PowerService {
 
     async fn ping(&self) -> String {
         "OK".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_amd_pmf_limits() {
+        let text = "spl:65000 fppt:65000 sppt:60000 sppt_apu_only:54000 stt_min:45000 stt[APU]:0 stt[HS2]: 0\n";
+        assert_eq!(PowerService::parse_amd_pmf_limits(text), Some((65, 60, 65)));
+        assert_eq!(PowerService::parse_amd_pmf_limits(""), None);
+        assert_eq!(PowerService::parse_amd_pmf_limits("spl:0 fppt:0 sppt:0"), None);
     }
 }

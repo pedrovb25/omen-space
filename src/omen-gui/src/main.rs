@@ -188,6 +188,15 @@ fn build_ui(app: &adw::Application) {
         gtk::glib::Propagation::Proceed
     });
 
+    // "app.close-window": lets the tray icon close the window (toggle) over D-Bus
+    // (org.gtk.Actions.Activate on org.hp.OmenSpace).
+    let close_action = gtk::gio::SimpleAction::new("close-window", None);
+    let window_for_action = window.clone();
+    close_action.connect_activate(move |_, _| {
+        window_for_action.close();
+    });
+    app.add_action(&close_action);
+
     render_ui(&window, "performance");
 
     // ── Unverified Board Banner ────────────────────────────────────────────
