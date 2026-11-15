@@ -1,146 +1,146 @@
 <div align="center">
   <img src="images/omenspace.png" alt="OMEN Space Logo" width="110" />
 
-  # OMEN Space
+  # OMEN Space · 8C75 Edition
 
-  **Native Linux hardware control center for HP OMEN, Victus & Transcend laptops.**  
-  Built from the ground up in **Rust** with **GTK4 & Libadwaita** for near-zero overhead.
+  **A fork of [OMEN Space](https://github.com/yunusemreyl/omen-space) tuned for the HP OMEN 17-db0xxx (board `8C75`) on Linux.**  
+  Quiet and stable cooling, honest power controls and a desktop that stays in sync with KDE Plasma, all event-driven.
 
   <p>
-    <a href="https://github.com/yunusemreyl/omen-space/releases/latest">
-      <img src="https://img.shields.io/badge/Release-v2.2.0-e11d48?style=flat-square" alt="Release v2.2.0" />
-    </a>
-    <a href="LICENSE">
-      <img src="https://img.shields.io/badge/License-GPL--3.0-10b981?style=flat-square" alt="License" />
-    </a>
+    <img src="https://img.shields.io/badge/Board-HP%208C75-e11d48?style=flat-square" alt="Board 8C75" />
+    <img src="https://img.shields.io/badge/Based%20on-OMEN%20Space%202.2.1-6366f1?style=flat-square" alt="Based on OMEN Space 2.2.1" />
+    <img src="https://img.shields.io/badge/Daily%20driver-Nobara%2044%20%C2%B7%20KDE%20Plasma%206-0ea5e9?style=flat-square" alt="Nobara 44 · KDE Plasma 6" />
     <img src="https://img.shields.io/badge/Written%20in-Rust-f97316?style=flat-square" alt="Rust" />
-    <img src="https://img.shields.io/badge/UI-GTK4%20%2B%20Libadwaita-3b82f6?style=flat-square" alt="GTK4" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-10b981?style=flat-square" alt="License GPL-3.0" /></a>
   </p>
 
   <p>
     <b>English</b> · <a href="README.es.md">Español</a>
   </p>
-
-  <br />
-  <img src="images/perf.png" width="92%" alt="OMEN Space — Performance & Telemetry" />
 </div>
 
 ---
 
-## Overview
+## Why this fork
 
-**OMEN Space** replaces bloated background utilities with a ~3 MB native Rust daemon and a responsive GTK4 desktop interface. It talks directly to HP WMI/ACPI interfaces, Embedded Controller (EC) registers, Intel RAPL / MSR, AMD Ryzen SMU, and USB HID lighting controllers over a privileged D-Bus service.
+OMEN Space supports a long list of HP OMEN, Victus and Transcend boards. On the **OMEN 17-db0xxx (8C75)** several things behaved differently from what the generic code expects. The most serious one: the Embedded Controller never restarts fans it has stopped, so in automatic mode a hot laptop could sit at **0 RPM at 95 °C** (upstream [#175](https://github.com/yunusemreyl/omen-space/issues/175)).
 
-| Module | Capabilities |
+This fork fixes that and tunes the rest of the stack for this one machine. Every change was measured on the real hardware: EC register dumps, the BIOS fan table, thermal limits, and power and CPU-usage readings.
+
+> [!IMPORTANT]
+> This build is **tuned and tested only on board `8C75`**. Other OMEN, Victus or Transcend models should use the [upstream project](https://github.com/yunusemreyl/omen-space).
+
+### Test machine
+
+| | |
 | :--- | :--- |
-| **Performance & Cooling** | `Eco`, `Balanced`, and `Performance` BIOS thermal profiles; software-smart `Auto` cooling, `Max` fan mode, custom multi-point fan curves with saved presets, one-click **Delegate to EC**, fan dust-cleaning mode, and continuous `>= 90°C` / `95°C` thermal protection. |
-| **Advanced Power** | Real-time Intel RAPL `PL1` / `PL2` power limits (with boot-default tracking), `TCC Offset` temperature ceiling, MSR voltage offsets (with hardware `UV_LOCK` detection), GPU Dynamic Boost (`cTGP` / `PPAB`), and AMD Ryzen SMU tuning. |
-| **Graphics Switcher (MUX)** | Switch between **Hybrid (MSHybrid)**, **Discrete (dGPU)**, and **Advanced Optimus** modes with live `eDP` display routing and NVIDIA driver telemetry. |
-| **RGB Studio** | 4-Zone OMEN, Single-Zone Victus, chassis Lightbar, and Darfon Per-Key (`0d62:54bf`) RGB lighting with static, breathing, wave, and hardware MCU animations. |
-| **Quick HUD (`Shift+F2`)** | In-game floating overlay and system tray applet for switching power and fan profiles on the fly without leaving your workflow. |
-| **Profile Manager & Updater** | Automatic per-application performance rules (Wayland & X11) and an integrated **Update Center** with commit-level changelog tracking, live build progress, and `fwupd` (LVFS) firmware scanning. |
+| **Laptop** | HP OMEN 17-db0xxx · board `8C75` |
+| **CPU / GPU** | AMD Ryzen 7 8845HS · NVIDIA GeForce RTX 4070 Laptop (hybrid) |
+| **Display** | 17.3" 240 Hz internal panel (eDP) |
+| **OS** | Nobara 44 · KDE Plasma 6 on Wayland · kernel 7.3 |
+
+---
+
+## What's different
+
+### 🌀 Cooling
+
+- **Fan control that works on the 8C75.** Fan levels are written to the EC (`XSS1`/`XSS2`). Max mode uses the WMI path, about 4500 RPM. Live RPM telemetry has been restored.
+- **Steady Auto curve.** Auto moves in steps, with 6 °C of hysteresis before stepping down, so the fans hold a constant speed instead of ramping up and down every few seconds. The fans reach about 87 % before the CPU hits 90 °C. Full speed comes at 90 °C on the CPU, or at 84 °C on the dGPU.
+- **Quiet mode.** A built-in quiet curve, also used automatically by the Eco power profile.
+- **Fans stop at idle.** The fans switch off fully when the laptop is cool. Before, a 45 °C floor in the temperature reading and the DDR5 sensors kept them spinning. The DDR5 sensors now only count from 75 °C.
+- **Follows the active power profile.** The fan curve follows whatever profile the kernel is using. That includes KDE switching to Eco when you unplug the charger and back when you plug it in.
+- **Thermal protection** for sustained overheating, plus the dGPU temperature fix, both taken from upstream v2.2.1.
+
+### ⚡ Power
+
+- **Real AMD power limits.** The real STAPM and PPT limits from `amd-pmf` are shown as read-only values, replacing the Intel-style 45/115 W placeholders. The firmware sets them again on every profile change, so the page explains this instead of offering sliders that would not stick.
+- **The desktop owns the power profile.** Plugging or unplugging the charger no longer forces a thermal profile or shows a notification. When KDE or power-profiles-daemon switches the profile, OMEN Space adopts it: it saves the profile and syncs GPU TGP/PPAB.
+- **No SMU polling.** `ryzenadj` is never queried in a loop, because polling the SMU on this kernel could freeze the system.
+- **No dead controls.** Curve Optimizer and battery care are marked as unavailable, because the firmware rejects them or Linux has no interface for them. The MUX page only offers the GPU modes the BIOS accepts.
+
+### 🖥️ Display & keyboard
+
+- **60 Hz in Eco, 240 Hz otherwise.** The internal panel uses the `freesync_video` 60 Hz mode while in Eco, which switches without a black screen.
+- **Brightness below the panel's minimum.** Under 8 % on KDE's slider the backlight barely changes. In that range the image is darkened with a calibration (ICC/vcgt) profile, from 100 % down to 50 % at 0 %. Night Light keeps working on top.
+- **Keyboard backlight in KDE.** The keyboard backlight is exposed via `uleds`, so the Plasma brightness slider and on-screen display work with it.
+
+### 🪶 Efficiency
+
+- **No polling anywhere.** The tray uses `ksni` 0.3 and reacts to D-Bus signals from the daemon, power-profiles-daemon and KDE. It no longer checks state every 50 ms.
+- **A lighter daemon.** It no longer scans every process once per second. It computes live telemetry only while a window or the overlay shows it, and runs on two threads. Idle CPU use went from about 2 % to under 1 %.
+- **Clean shutdown.** The daemon exits immediately on `SIGTERM`, where it used to take 45 s and end in `SIGABRT`.
+
+### 🧭 Quality of life
+
+- Clicking the tray icon opens the window, and clicking again closes it.
+- A powered-off dGPU is labelled **Off** instead of `D3Cold`, and the DKMS driver status is shown correctly.
+- Version **2.2.1**, with no background update checks. The upstream updater is disabled, because this is a personal fork: upstream releases are reviewed and ported by hand.
+
+---
+
+## Hardware notes (8C75)
+
+Findings collected while building this fork, useful to anyone working on this board:
+
+| Topic | Finding |
+| :--- | :--- |
+| **EC auto mode** | `XSS1`/`XSS2` = `0xFF` hands control to the EC. The EC stops the fans when cold but never restarts them. |
+| **BIOS fan table** | 12 fixed levels, 1600 to 3900 RPM (22 to 46 dB), with no temperature points. HP's top level is about 87 % of the WMI maximum. |
+| **Shared heatsink** | Driving the two fans independently was tested and rejected. At 75 %/30 % the CPU kept rising past 87 °C, against 79 °C with both fans at 75 %. |
+| **Thermal limits** | The CPU does not throttle at 95 °C (61 W, ~4.2 GHz). The GPU targets 87 °C, throttles at ~88 °C and shuts down at ~98 °C. |
+| **AMD power limits** | Set by the `amd-pmf` static slider table on every profile change. On AC: Eco and Balanced 65/54/65 W, Performance slow PPT 60 W. Much lower on battery. |
+| **MUX** | The BIOS only accepts modes 0 and 1. On HP, "hybrid" is Advanced Optimus on Windows. |
+| **Backlight** | Firmware minimum ≈ 2 % duty, reached at 6 % on KDE's slider. |
 
 ---
 
 ## Installation
 
-Run the one-line installer to automatically detect your distribution, install build dependencies, compile the workspace, and register the DKMS kernel drivers (`hp-wmi` & `hp-omen-extra`):
+> [!WARNING]
+> Only install this fork on an HP OMEN 17-db0xxx (board `8C75`). Check your board with `cat /sys/class/dmi/id/board_name`.
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/yunusemreyl/omen-space/main/install.sh | sudo bash -s -- --stable
-```
-
-To track the latest commits directly from `main`:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/yunusemreyl/omen-space/main/install.sh | sudo bash -s -- --canary
-```
-
-<details>
-<summary><b>Manual Build, Arch Linux (PKGBUILD), NixOS & Uninstall</b></summary>
-
-#### Manual Install (Ubuntu/Debian, Fedora, Arch, openSUSE)
-```bash
-git clone https://github.com/yunusemreyl/omen-space.git
+git clone https://github.com/pedrovb25/omen-space.git
 cd omen-space
 sudo ./setup.sh install
 ```
 
-#### Arch Linux (`makepkg`)
-```bash
-git clone https://github.com/yunusemreyl/omen-space.git
-cd omen-space
-makepkg -si
-```
-
-#### NixOS (Flakes)
-```bash
-nix profile install github:yunusemreyl/omen-space
-```
-
-#### Update or Uninstall
-```bash
-sudo ./setup.sh update      # Pull latest changes, rebuild, and reinstall
-sudo ./setup.sh uninstall   # Remove daemon, UI, and DKMS modules cleanly
-```
-</details>
-
----
-
-## Interface Gallery
-
-<p align="center">
-  <img src="images/keyboard.png" width="49%" alt="RGB Studio" />
-  <img src="images/undervolt.png" width="49%" alt="Advanced Power & RAPL" />
-</p>
-<p align="center">
-  <img src="images/mux.png" width="49%" alt="Graphics Switcher (MUX)" />
-  <img src="images/appprofiles.png" width="49%" alt="Application Profile Manager" />
-</p>
-<p align="center">
-  <img src="images/updater.png" width="49%" alt="Update Center" />
-  <img src="images/diagnostic.png" width="49%" alt="System Monitor" />
-</p>
+The installer is unchanged from upstream. It installs the build dependencies, compiles the workspace and registers the DKMS kernel drivers (`hp-wmi` and `hp-omen-extra`). To remove everything: `sudo ./setup.sh uninstall`.
 
 <details>
-<summary><b>More Views (Settings & Interactive CLI)</b></summary>
+<summary><b>Branches</b></summary>
 <br />
-<p align="center">
-  <img src="images/settings.png" width="49%" alt="Settings" />
-  <img src="images/cli.png" width="49%" alt="Interactive CLI" />
-</p>
+
+`main` is the stable line of this fork. Each change was developed on its own branch (`feat/8c75-*`, `fix/8c75-*`, `perf/*`…), each built on top of the previous one, so every fix can be reviewed or cherry-picked on its own.
 </details>
 
 ---
 
 ## Architecture
 
+The architecture is the same as upstream:
+
 | Component | Role |
 | :--- | :--- |
-| **`omen-space-daemon`** | Root `systemd` service managing WMI, ACPI, sysfs, EC, MSR/RAPL, and HID devices over D-Bus (`org.hp.omen.*`). |
-| **`omen-gui`** | Native GTK4 + Libadwaita desktop application with scalable UI (`Ctrl+Shift+Plus` / `Minus`) and instant localization (**English**, **Türkçe**, **Español**). |
-| **`omen-overlay`** | Lightweight Quick Access HUD (`Shift+F2`) synchronized in real time with the daemon and main GUI. |
-| **`omen-tray`** | StatusNotifierItem system tray applet for quick profile switching and background hotkey handling. |
-| **`omen-cli`** | Scriptable command-line interface and interactive TUI (`omen-cli system info`, `omen-cli overlay toggle`, `omen-cli system check-update`). |
-| **`hp-omen-extra`** | Custom DKMS kernel driver package (`hp-wmi` + `hp-omen-extra`) exposing fan PWM, thermal profiles, GPU TGP/PPAB, and RGB zones. |
-
----
-
-## What's New in v2.2.0
-
-- **Overhauled Update Center:** Commit-aware version tracking (`v2.2.0 • #sha`), automatic GitHub `main` & release comparison, inline step-by-step build progress with live log streaming, safe `pkexec` user toolchain resolution, and one-click app restart.
-- **Expanded Hardware & Board Support:** Verified and added thermal/WMI quirks for **8EEC** (HyperX OMEN 15-gb0xxx + `WMBA` 512-byte ACPI buffer fix), **8EDD** (HyperX OMEN 16-ap0xxx), **8C2D** (Victus 15-fa1xxx), **8D26** (OMEN 16-xd0xxx), **8A17** (OMEN 17t-ck100), **8BCD** (OMEN 16-wf0xxx), **8A43**, **88D1**, **8902**, and **8EEF**.
-- **Smarter Thermal Alerts & Notifications:** Continuous 3-second `>= 90°C` debounce filter eliminates false positives from brief boost spikes; user-session notifications replace in-place via `notify-send -p/-r` without stacking in GNOME Shell history.
-- **UI & Telemetry Refinements:** Fixed custom fan curve preset selection and live graph preview, added **Reset Default** button and theme-proof color swatches in RGB Studio, added live sync to the `Shift+F2` Quick Overlay, and improved `UV_LOCK` / Core Ultra HX detection in Advanced Power.
+| **`omen-space-daemon`** | Root `systemd` service: WMI, ACPI, sysfs, EC, power and HID over D-Bus (`org.hp.omen.*`). |
+| **`omen-gui`** | GTK4 + Libadwaita desktop application. |
+| **`omen-tray`** | Tray icon: quick fan/GPU modes, panel refresh rate per profile, low-brightness dimming. |
+| **`omen-overlay`** | Quick Access HUD (`Shift+F2`). |
+| **`omen-cli`** | Scriptable command-line interface. |
+| **`hp-omen-extra`** | DKMS kernel driver package (`hp-wmi` + `hp-omen-extra`). |
 
 ---
 
 ## Credits & License
 
-Licensed under the **GPL-3.0 License**.
+All credit for OMEN Space goes to its authors. This fork only adapts it to one board.
 
-- **[yunusemreyl](https://github.com/yunusemreyl)** — Lead Developer
-- **[tuxov](https://github.com/tuxov)** — Kernel Module Lead
-- Community contributors: [@aloshy0](https://github.com/aloshy0), [@henfiber](https://github.com/henfiber), [@adrianatencia](https://github.com/adrianatencia), [@CodesRahul96](https://github.com/CodesRahul96), [@xcellsior](https://github.com/xcellsior), [@TitoTFP](https://github.com/TitoTFP), [@SafSaf0999](https://github.com/SafSaf0999), [@yijean34-source](https://github.com/yijean34-source), [@ManOfDiamond](https://github.com/ManOfDiamond), [@ASPRNG-PRGMR](https://github.com/ASPRNG-PRGMR), [@WoofahRayetCode](https://github.com/WoofahRayetCode), and [@ktarxhun](https://github.com/ktarxhun).
+- **[yunusemreyl](https://github.com/yunusemreyl)**: OMEN Space lead developer
+- **[tuxov](https://github.com/tuxov)**: kernel module lead
+- The OMEN Space community contributors (see [upstream](https://github.com/yunusemreyl/omen-space#credits--license))
+- **[pedrovb25](https://github.com/pedrovb25)**: 8C75 fork
+
+Licensed under the **GPL-3.0 License**, like the original project.
 
 *Disclaimer: OMEN Space is an independent open-source project and is not affiliated with or endorsed by HP Inc.*
