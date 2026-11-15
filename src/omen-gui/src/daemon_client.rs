@@ -300,11 +300,20 @@ pub enum DaemonStatus {
 }
 
 static TELEMETRY_SENDERS: OnceLock<std::sync::Mutex<Vec<glib::Sender<SystemStats>>>> = OnceLock::new();
-static DAEMON_STATUS_SENDERS: OnceLock<std::sync::Mutex<Vec<glib::Sender<DaemonStatus>>>> = OnceLock::new();
 static TELEMETRY_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Last known daemon status plus its subscribers, under one lock so a new subscriber
+/// never misses a transition that happens while it registers.
+struct StatusState {
+    current: Option<DaemonStatus>,
+    senders: Vec<glib::Sender<DaemonStatus>>,
+}
+static DAEMON_STATUS: std::sync::Mutex<StatusState> =
+    std::sync::Mutex::new(StatusState { current: None, senders: Vec::new() });
+static STATUS_WATCH_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Subscribe to daemon online/offline transitions.
-/// The callback is invoked on the GTK main thread.
+/// The callback is invoked on the GTK main thread, first with the current status if known.
 #[allow(deprecated)]
 pub fn subscribe_daemon_status<F>(mut callback: F)
 where
@@ -315,14 +324,59 @@ where
         callback(status);
         glib::ControlFlow::Continue
     });
-    let senders = DAEMON_STATUS_SENDERS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
-    senders.lock().unwrap_or_else(|e| e.into_inner()).push(tx);
+    {
+        let mut state = DAEMON_STATUS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = state.current.clone() {
+            let _ = tx.send(current);
+        }
+        state.senders.push(tx);
+    }
+    if !STATUS_WATCH_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        get_runtime().spawn(watch_daemon_name());
+    }
 }
 
+/// Notifies subscribers only when the status actually changes.
 fn broadcast_daemon_status(status: DaemonStatus) {
-    if let Some(mutex) = DAEMON_STATUS_SENDERS.get() {
-        let mut senders = mutex.lock().unwrap_or_else(|e| e.into_inner());
-        senders.retain(|tx| tx.send(status.clone()).is_ok());
+    let mut state = DAEMON_STATUS.lock().unwrap_or_else(|e| e.into_inner());
+    if state.current.as_ref() == Some(&status) {
+        return;
+    }
+    state.current = Some(status.clone());
+    state.senders.retain(|tx| tx.send(status.clone()).is_ok());
+}
+
+/// Drops the shared connection so the next call opens a fresh one (the bus itself went away).
+async fn reset_conn() {
+    SHARED_CONN.lock().await.take();
+}
+
+/// Follows the bus owner of `org.hp.omen`: the bus announces when the daemon starts, stops
+/// or crashes (NameOwnerChanged), so nothing is polled.
+async fn watch_daemon_name() {
+    use zbus::export::futures_util::StreamExt;
+    loop {
+        if let Ok(conn) = get_conn().await {
+            if let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await {
+                if let Ok(mut changes) = dbus.receive_name_owner_changed_with_args(&[(0, "org.hp.omen")]).await {
+                    // Subscribe first, then read the current owner, so no transition is lost.
+                    let name = zbus::names::WellKnownName::from_static_str_unchecked("org.hp.omen").into();
+                    if let Ok(has_owner) = dbus.name_has_owner(name).await {
+                        broadcast_daemon_status(if has_owner { DaemonStatus::Online } else { DaemonStatus::Offline });
+                    }
+                    while let Some(change) = changes.next().await {
+                        if let Ok(args) = change.args() {
+                            let online = args.new_owner().is_some();
+                            broadcast_daemon_status(if online { DaemonStatus::Online } else { DaemonStatus::Offline });
+                        }
+                    }
+                }
+            }
+        }
+        // The bus connection itself is gone: the daemon is unreachable until it comes back.
+        broadcast_daemon_status(DaemonStatus::Offline);
+        reset_conn().await;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 
@@ -355,16 +409,10 @@ where
         });
         rt.spawn(async move {
             use zbus::export::futures_util::StreamExt;
-            #[allow(unused_assignments)]
-            let mut was_online = false;
             loop {
                 if let Ok(conn) = get_conn().await {
                     if let Ok(proxy) = SysMonProxy::new(&conn).await {
                         if let Ok(mut stream) = proxy.receive_telemetry_updated().await {
-                            // We successfully connected — broadcast Online if we weren't before
-                            if !was_online {
-                                          broadcast_daemon_status(DaemonStatus::Online);
-                            }
                             while let Some(signal) = stream.next().await {
                                 if let Ok(args) = signal.args() {
                                     let json_str = args.json_stats();
@@ -378,16 +426,10 @@ where
                                     }
                                 }
                             }
-                            // Stream ended — daemon went offline
-                            was_online = false;
-                            broadcast_daemon_status(DaemonStatus::Offline);
+                            // The stream only ends when the bus connection drops; daemon
+                            // restarts are reported by watch_daemon_name.
+                            reset_conn().await;
                         }
-                    }
-                } else {
-                    // Could not connect at all
-                    if was_online {
-                        was_online = false;
-                        broadcast_daemon_status(DaemonStatus::Offline);
                     }
                 }
                 // Backoff before retrying

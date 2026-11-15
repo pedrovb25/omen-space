@@ -17,6 +17,7 @@ mod ui_scale;
 mod desktop_rgb_gui;
 mod updater;
 mod daemon_client;
+mod daemon_status_ui;
 mod asset_resolver;
 const APP_ID: &str = "org.hp.OmenSpace";
 
@@ -198,6 +199,8 @@ fn build_ui(app: &adw::Application) {
     app.add_action(&close_action);
 
     render_ui(&window, "performance");
+    // One "daemon offline" prompt for the whole window, not one per page.
+    daemon_status_ui::bind(&window);
 
     // ── Unverified Board Banner ────────────────────────────────────────────
     // Check once whether the current board is in the community-verified list.
