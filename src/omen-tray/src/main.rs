@@ -1,4 +1,5 @@
 mod i18n;
+mod low_brightness;
 mod overlay_proc;
 
 use ksni::menu::{CheckmarkItem, StandardItem, SubMenu};
@@ -735,5 +736,7 @@ async fn main() {
     // sets the panel refresh rate.
     tokio::spawn(follow_fan_mode(handle.clone()));
     tokio::spawn(follow_gpu_mode(handle));
+    // KDE's brightness change signal darkens the image below the panel's minimum backlight.
+    tokio::spawn(low_brightness::follow());
     follow_power_profile_for_panel().await;
 }
