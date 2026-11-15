@@ -243,6 +243,11 @@ impl PowerService {
             Self::app_monitor_loop(config_clone, app_state).await;
         });
 
+        let config_clone = svc.config.clone();
+        tokio::spawn(async move {
+            Self::follow_desktop_profile(config_clone).await;
+        });
+
         Ok(svc)
     }
 
@@ -597,6 +602,60 @@ impl PowerService {
         }
     }
 
+    // ── Desktop profile follow ─────────────────────────────────────────────────
+
+    /// Follows power-profiles-daemon's ActiveProfile, which the desktop changes on its own
+    /// (KDE's profile menu, or Eco/Balanced on AC unplug/plug), and applies it as if it had been
+    /// picked in OMEN Space: saved profile and GPU TGP/PPAB. Sleeps on PropertiesChanged; only
+    /// retries (every 30 s) while power-profiles-daemon is unreachable.
+    async fn follow_desktop_profile(config: Arc<Mutex<PowerConfig>>) {
+        use futures::StreamExt;
+        let iface = "net.hadess.PowerProfiles";
+        loop {
+            if let Ok(conn) = zbus::Connection::system().await {
+                let proxy = zbus::fdo::PropertiesProxy::builder(&conn)
+                    .destination(iface)
+                    .and_then(|b| b.path("/net/hadess/PowerProfiles"));
+                if let Ok(proxy) = match proxy { Ok(b) => b.build().await, Err(e) => Err(e) } {
+                    if let Ok(mut stream) = proxy.receive_properties_changed().await {
+                        let name = zbus::names::InterfaceName::from_static_str_unchecked(iface);
+                        if let Ok(v) = proxy.get(name, "ActiveProfile").await {
+                            if let Ok(p) = <String>::try_from(v) {
+                                Self::adopt_desktop_profile(&config, &p).await;
+                            }
+                        }
+                        while let Some(signal) = stream.next().await {
+                            let Ok(args) = signal.args() else { continue };
+                            if args.interface_name() != iface {
+                                continue;
+                            }
+                            if let Some(v) = args.changed_properties().get("ActiveProfile") {
+                                if let Ok(p) = <&str>::try_from(v) {
+                                    let p = p.to_string();
+                                    Self::adopt_desktop_profile(&config, &p).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        }
+    }
+
+    async fn adopt_desktop_profile(config: &Arc<Mutex<PowerConfig>>, ppd_profile: &str) {
+        let profile = Self::normalize_profile(ppd_profile);
+        {
+            let mut cfg = config.lock().await;
+            if cfg.power_profile != profile {
+                info!("Desktop switched power profile to '{}'", profile);
+                cfg.power_profile = profile.clone();
+                cfg.save();
+            }
+        }
+        Self::sync_gpu_power(&profile).await;
+    }
+
     // ── Profile application ────────────────────────────────────────────────────
 
     /// Writes platform_profile (checks _choices) + thermal_profile — mirrors
@@ -740,18 +799,16 @@ impl PowerService {
         let tgp = format!("{}/gpu_tgp", base);
         let ppab = format!("{}/gpu_ppab", base);
         if !sysfs_exists(&tgp) { return; }
-        match profile {
-            "performance" => {
-                let _ = sysfs_write_async(&tgp, "1").await;
-                let _ = sysfs_write_async(&ppab, "1").await;
-            }
-            "balanced" => {
-                let _ = sysfs_write_async(&tgp, "0").await;
-                let _ = sysfs_write_async(&ppab, "1").await;
-            }
-            _ => {
-                let _ = sysfs_write_async(&tgp, "0").await;
-                let _ = sysfs_write_async(&ppab, "0").await;
+        let (tgp_val, ppab_val) = match profile {
+            "performance" => ("1", "1"),
+            "balanced" => ("0", "1"),
+            _ => ("0", "0"),
+        };
+        // Each write is a WMI call: skip values that are already set (this runs both when
+        // OMEN Space and when the desktop changes the profile, often for the same switch).
+        for (path, val) in [(&tgp, tgp_val), (&ppab, ppab_val)] {
+            if sysfs_read_async(path).await.as_deref() != Some(val) {
+                let _ = sysfs_write_async(path, val).await;
             }
         }
         info!("GPU TGP/PPAB synced for profile '{}'", profile);

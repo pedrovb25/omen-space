@@ -9,7 +9,12 @@ use std::sync::Arc;
 use crate::notifier::DesktopNotifier;
 use std::sync::OnceLock;
 
-static SENSOR_TEMP_PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+/// hwmon temperature inputs used for the fan curves, flagged true for RAM (DIMM) sensors.
+static SENSOR_TEMP_PATHS: OnceLock<Vec<(PathBuf, bool)>> = OnceLock::new();
+
+/// RAM sensors only count from this temperature: DDR5 is rated to 85 °C and idles around
+/// 40-48 °C here, which would otherwise keep the fans spinning.
+pub const RAM_SENSOR_MIN_TEMP_C: f64 = 75.0;
 pub const THERMAL_PROTECTION_TRIGGER_TEMP: f64 = 95.0;
 pub const THERMAL_PROTECTION_RECOVER_TEMP: f64 = 82.0;
 /// Seconds (1 Hz samples) a thermal condition must persist before a desktop notice is shown (#327).
@@ -396,6 +401,32 @@ impl FanService {
         pct
     }
 
+    /// Active power profile as "performance", "balanced" or "power-saver", read from the
+    /// kernel's platform_profile. power.json is only a fallback when that is unreadable: it is
+    /// written only when the profile is changed through OMEN Space, so after the desktop switched
+    /// the profile on its own (e.g. Eco on unplug) it still names the old one.
+    fn current_power_profile() -> &'static str {
+        let raw = std::fs::read_to_string("/sys/firmware/acpi/platform_profile")
+            .or_else(|_| std::fs::read_to_string("/sys/devices/platform/hp-wmi/platform_profile"))
+            .ok()
+            .or_else(|| {
+                std::fs::read_to_string("/etc/omen-space/power.json")
+                    .ok()
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+                    .and_then(|v| v.get("power_profile").and_then(|p| p.as_str().map(str::to_string)))
+            })
+            .unwrap_or_default();
+        Self::normalize_power_profile(&raw)
+    }
+
+    fn normalize_power_profile(raw: &str) -> &'static str {
+        match raw.trim() {
+            "performance" => "performance",
+            "low-power" | "quiet" | "cool" | "power-saver" => "power-saver",
+            _ => "balanced",
+        }
+    }
+
     pub fn is_ignored_sensor_device(name: &str, vendor: &str, class: &str) -> bool {
         let name_lower = name.trim().to_lowercase();
         if name_lower.contains("nvidia")
@@ -413,6 +444,12 @@ impl FanService {
         v.eq_ignore_ascii_case("0x10de") && c.starts_with("0x03")
     }
 
+    /// DDR5 SPD hub / DIMM temperature sensors (counted only from RAM_SENSOR_MIN_TEMP_C).
+    pub fn is_ram_sensor(name: &str) -> bool {
+        let n = name.trim().to_lowercase();
+        n.contains("spd5118") || n.contains("jc42")
+    }
+
     /// Returns (hottest sensor, dGPU temperature). The dGPU value is 0.0 while it sleeps.
     async fn get_max_temp() -> (f64, f64) {
         tokio::task::spawn_blocking(|| {
@@ -420,34 +457,44 @@ impl FanService {
                 let mut p = Vec::new();
                 if let Ok(entries) = glob("/sys/class/hwmon/hwmon*/temp*_input") {
                     for entry in entries.filter_map(Result::ok) {
-                        let should_ignore = if let Some(parent) = entry.parent() {
+                        let (should_ignore, is_ram) = if let Some(parent) = entry.parent() {
                             let name = std::fs::read_to_string(parent.join("name")).unwrap_or_default();
                             let vendor = std::fs::read_to_string(parent.join("device/vendor")).unwrap_or_default();
                             let class = std::fs::read_to_string(parent.join("device/class")).unwrap_or_default();
-                            Self::is_ignored_sensor_device(&name, &vendor, &class)
+                            (Self::is_ignored_sensor_device(&name, &vendor, &class), Self::is_ram_sensor(&name))
                         } else {
-                            false
+                            (false, false)
                         };
 
                         if !should_ignore {
-                            p.push(entry);
+                            p.push((entry, is_ram));
                         }
                     }
                 }
                 p
             });
 
-            let mut max_temp = 45.0;
+            // No floor: the old 45 °C starting value kept Auto/Eco from ever stopping the fans
+            // (they stop below 43-44 °C). 45 °C is only the fallback when nothing is readable.
+            let mut max_temp: f64 = 0.0;
+            let mut any_read = false;
             // 1. Read CPU / motherboard sensors via standard hwmon
-            for entry in paths {
+            for (entry, is_ram) in paths {
                 if let Ok(val_str) = std::fs::read_to_string(entry) {
                     if let Ok(milli) = val_str.trim().parse::<f64>() {
                         let temp = milli / 1000.0;
-                        if temp > max_temp && temp < 150.0 {
+                        if !(0.0..150.0).contains(&temp) || (*is_ram && temp < RAM_SENSOR_MIN_TEMP_C) {
+                            continue;
+                        }
+                        any_read = true;
+                        if temp > max_temp {
                             max_temp = temp;
                         }
                     }
                 }
+            }
+            if !any_read {
+                max_temp = 45.0;
             }
 
             // 2. Factor in dGPU temperature safely (returns 0.0 when sleeping or cooling down)
@@ -839,38 +886,13 @@ impl FanService {
                     let is_fan_on = state.auto_fan_activated_at.is_some();
                     
                     // Check if current system power profile is "performance"
-                    let is_performance_power = {
-                        let pp_path = "/sys/firmware/acpi/platform_profile";
-                        let hp_path = "/sys/devices/platform/hp-wmi/platform_profile";
-                        let sysfs_perf = if let Ok(val) = std::fs::read_to_string(pp_path) {
-                            val.trim() == "performance"
-                        } else if let Ok(val) = std::fs::read_to_string(hp_path) {
-                            val.trim() == "performance"
-                        } else {
-                            false
-                        };
-                        sysfs_perf || std::fs::read_to_string("/etc/omen-space/power.json")
-                            .ok()
-                            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
-                            .and_then(|v| v.get("power_profile").and_then(|p| p.as_str().map(|s| s == "performance")))
-                            .unwrap_or(false)
-                    };
-
+                    // The kernel's platform_profile is what is really active: KDE /
+                    // power-profiles-daemon switch it on AC plug/unplug without touching
+                    // OMEN Space's power.json, which can then be stale (see current_power_profile).
+                    let power_profile = Self::current_power_profile();
+                    let is_performance_power = power_profile == "performance";
                     // Eco power profile: Auto follows the Quiet curve.
-                    let is_eco_power = !is_performance_power && {
-                        let pp_path = "/sys/firmware/acpi/platform_profile";
-                        let hp_path = "/sys/devices/platform/hp-wmi/platform_profile";
-                        let is_eco_name = |s: &str| matches!(s, "low-power" | "quiet" | "cool" | "power-saver");
-                        let sysfs_eco = std::fs::read_to_string(pp_path)
-                            .or_else(|_| std::fs::read_to_string(hp_path))
-                            .map(|val| is_eco_name(val.trim()))
-                            .unwrap_or(false);
-                        sysfs_eco || std::fs::read_to_string("/etc/omen-space/power.json")
-                            .ok()
-                            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
-                            .and_then(|v| v.get("power_profile").and_then(|p| p.as_str().map(is_eco_name)))
-                            .unwrap_or(false)
-                    };
+                    let is_eco_power = power_profile == "power-saver";
 
                     if state.last_power_profile_was_perf != is_performance_power
                         || state.last_power_profile_was_eco != is_eco_power
@@ -1650,6 +1672,16 @@ mod tests {
         assert_eq!(s(77.9, 77.9, 100), 75);
         // Performance steps never stop the fans.
         assert_eq!(FanService::stable_step_pct(&PERF_STEPS, 30.0, 0.0, 0), 40);
+    }
+
+    #[test]
+    fn test_normalize_power_profile() {
+        assert_eq!(FanService::normalize_power_profile("low-power\n"), "power-saver");
+        assert_eq!(FanService::normalize_power_profile("performance"), "performance");
+        assert_eq!(FanService::normalize_power_profile("balanced"), "balanced");
+        assert_eq!(FanService::normalize_power_profile(""), "balanced");
+        assert!(FanService::is_ram_sensor("spd5118"));
+        assert!(!FanService::is_ignored_sensor_device("spd5118", "", ""));
     }
 
     #[test]
