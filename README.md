@@ -139,7 +139,7 @@ All credit for OMEN Space goes to its authors. This fork only adapts it to one b
 - **[yunusemreyl](https://github.com/yunusemreyl)**: OMEN Space lead developer
 - **[tuxov](https://github.com/tuxov)**: kernel module lead
 - The OMEN Space community contributors (see [upstream](https://github.com/yunusemreyl/omen-space#credits--license))
-- **[pedrovb25](https://github.com/pedrovb25)**: 8C75 fork
+- **[pedrovb25](https://github.com/pedrovb25)**: 8C75 fork, developed with the help of **Claude Opus 5.5** (Anthropic) for diagnosing the problems and reviewing the code
 
 Licensed under the **GPL-3.0 License**, like the original project.
 
