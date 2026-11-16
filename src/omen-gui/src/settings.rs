@@ -9,7 +9,6 @@ use crate::i18n::{self, Language};
    ───────────────────────────────────────────────────────────── */
 
 pub fn build_page(window: &adw::ApplicationWindow, on_lang_changed: Option<Rc<dyn Fn()>>, lb_group_opt: Option<adw::PreferencesGroup>, lb_preview_group_opt: Option<adw::PreferencesGroup>) -> gtk::Box {
-    let mut init_hb = 30.0;
     let mut init_auto = true;
     let mut init_startup_profile = 0u32;
     let mut init_battery_care = false;
@@ -26,7 +25,6 @@ pub fn build_page(window: &adw::ApplicationWindow, on_lang_changed: Option<Rc<dy
         let path = format!("{}/.config/omenspace/settings.json", home);
         if let Ok(json_str) = std::fs::read_to_string(&path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                if let Some(hb) = json.get("heartbeat_interval").and_then(|v| v.as_f64()) { init_hb = hb; }
                 if let Some(auto) = json.get("autostart").and_then(|v| v.as_bool()) { init_auto = auto; }
                 if let Some(sp) = json.get("startup_profile").and_then(|v| v.as_u64()) { init_startup_profile = sp as u32; }
                 if let Some(bc) = json.get("battery_care").and_then(|v| v.as_bool()) { init_battery_care = bc; }
@@ -200,17 +198,7 @@ pub fn build_page(window: &adw::ApplicationWindow, on_lang_changed: Option<Rc<dy
     daemon_row.add_suffix(&status_badge);
     daemon_group.add(&daemon_row);
 
-    let heartbeat_row = adw::ActionRow::builder()
-        .title(i18n::t("heartbeat_interval"))
-        .subtitle(i18n::t("heartbeat_sub"))
-        .build();
-    let hb_spin = gtk::SpinButton::with_range(5.0, 120.0, 5.0);
-    hb_spin.set_value(init_hb);
-    hb_spin.set_valign(gtk::Align::Center);
-    heartbeat_row.add_suffix(&hb_spin);
-    daemon_group.add(&heartbeat_row);
-
-    // Keep Settings daemon status badge synchronized via status subscription + heartbeat interval (#313)
+    // The badge follows the bus's NameOwnerChanged for the daemon: no periodic ping.
     {
         let badge_sub = status_badge.clone();
         crate::daemon_client::subscribe_daemon_status(move |status| {
@@ -218,24 +206,6 @@ pub fn build_page(window: &adw::ApplicationWindow, on_lang_changed: Option<Rc<dy
             let alive = status == DaemonStatus::Online;
             badge_sub.set_label(if alive { i18n::t("connected") } else { i18n::t("disconnected") });
             badge_sub.set_css_classes(if alive { &["badge-ok"] } else { &["badge-warn"] });
-        });
-
-        let badge_hb = status_badge.clone();
-        let hb_spin_poll = hb_spin.clone();
-        glib::spawn_future_local(async move {
-            loop {
-                let secs = hb_spin_poll.value().clamp(5.0, 120.0) as u64;
-                glib::timeout_future_seconds(secs as u32).await;
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                crate::daemon_client::get_runtime().spawn(async move {
-                    let alive = crate::daemon_client::ping_daemon_sync();
-                    let _ = tx.send(alive);
-                });
-                if let Ok(alive) = rx.await {
-                    badge_hb.set_label(if alive { i18n::t("connected") } else { i18n::t("disconnected") });
-                    badge_hb.set_css_classes(if alive { &["badge-ok"] } else { &["badge-warn"] });
-                }
-            }
         });
     }
 
@@ -314,7 +284,6 @@ pub fn build_page(window: &adw::ApplicationWindow, on_lang_changed: Option<Rc<dy
 
 
     // Save logic for all
-    let hb_spin_clone = hb_spin.clone();
     let as_row_clone = autostart_row.clone();
     let sm_row_clone = startup_mode_row.clone();
     let bat_row_clone = battery_row.clone();
@@ -324,7 +293,6 @@ pub fn build_page(window: &adw::ApplicationWindow, on_lang_changed: Option<Rc<dy
     let lb_row_clone = lightbar_row.clone();
 
     let save_settings = move || {
-        let hb = hb_spin_clone.value();
         let auto = as_row_clone.is_active();
         let sp = sm_row_clone.selected();
         let bc = bat_row_clone.is_active();
@@ -342,7 +310,9 @@ pub fn build_page(window: &adw::ApplicationWindow, on_lang_changed: Option<Rc<dy
             if let Ok(js) = std::fs::read_to_string(&path) {
                 if let Ok(j) = serde_json::from_str::<serde_json::Value>(&js) { json = j; }
             }
-            json["heartbeat_interval"] = serde_json::json!(hb);
+            if let Some(obj) = json.as_object_mut() {
+                obj.remove("heartbeat_interval"); // setting no longer exists
+            }
             json["autostart"] = serde_json::json!(auto);
             json["startup_profile"] = serde_json::json!(sp);
             json["battery_care"] = serde_json::json!(bc);
@@ -355,8 +325,6 @@ pub fn build_page(window: &adw::ApplicationWindow, on_lang_changed: Option<Rc<dy
     };
 
     let save_settings_rc = Rc::new(save_settings);
-    let s1 = save_settings_rc.clone();
-    hb_spin.connect_value_changed(move |_| s1());
     let s2 = save_settings_rc.clone();
     autostart_row.connect_active_notify(move |_| s2());
     let s3 = save_settings_rc.clone();
