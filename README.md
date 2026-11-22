@@ -8,7 +8,7 @@
 
   <p>
     <img src="https://img.shields.io/badge/Board-HP%208C75-e11d48?style=flat-square" alt="Board 8C75" />
-    <img src="https://img.shields.io/badge/Based%20on-OMEN%20Space%202.2.1-6366f1?style=flat-square" alt="Based on OMEN Space 2.2.1" />
+    <img src="https://img.shields.io/badge/Upstream%20reviewed-up%20to%20v2.3.0-6366f1?style=flat-square" alt="Upstream reviewed up to v2.3.0" />
     <img src="https://img.shields.io/badge/Daily%20driver-Nobara%2044%20%C2%B7%20KDE%20Plasma%206-0ea5e9?style=flat-square" alt="Nobara 44 · KDE Plasma 6" />
     <img src="https://img.shields.io/badge/Written%20in-Rust-f97316?style=flat-square" alt="Rust" />
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-10b981?style=flat-square" alt="License GPL-3.0" /></a>
@@ -75,7 +75,8 @@ This fork fixes that and tunes the rest of the stack for this one machine. Every
 
 - Clicking the tray icon opens the window, and clicking again closes it.
 - A powered-off dGPU is labelled **Off** instead of `D3Cold`, and the DKMS driver status is shown correctly.
-- Version **2.2.1**, with no background update checks. The upstream updater is disabled, because this is a personal fork: upstream releases are reviewed and ported by hand.
+- A single "daemon offline" prompt per window, driven by the bus's own signal, that closes by itself when the daemon is back.
+- Based on **2.2.1**, with upstream changes reviewed up to **v2.3.0** and the useful ones ported by hand. The upstream updater is removed, because this is a personal fork: the Update Center just shows the latest upstream release and links to it.
 
 ---
 

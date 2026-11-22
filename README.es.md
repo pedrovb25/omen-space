@@ -8,7 +8,7 @@
 
   <p>
     <img src="https://img.shields.io/badge/Placa-HP%208C75-e11d48?style=flat-square" alt="Placa 8C75" />
-    <img src="https://img.shields.io/badge/Basado%20en-OMEN%20Space%202.2.1-6366f1?style=flat-square" alt="Basado en OMEN Space 2.2.1" />
+    <img src="https://img.shields.io/badge/Original%20revisado-hasta%20v2.3.0-6366f1?style=flat-square" alt="Original revisado hasta la v2.3.0" />
     <img src="https://img.shields.io/badge/Uso%20diario-Nobara%2044%20%C2%B7%20KDE%20Plasma%206-0ea5e9?style=flat-square" alt="Nobara 44 · KDE Plasma 6" />
     <img src="https://img.shields.io/badge/Lenguaje-Rust-f97316?style=flat-square" alt="Rust" />
     <a href="LICENSE"><img src="https://img.shields.io/badge/Licencia-GPL--3.0-10b981?style=flat-square" alt="Licencia GPL-3.0" /></a>
@@ -75,7 +75,8 @@ Este fork corrige eso y ajusta el resto del programa para esta máquina concreta
 
 - Un clic en el icono de la bandeja abre la ventana, y otro clic la cierra.
 - La gráfica apagada aparece como **Apagada** en lugar de `D3Cold`, y el estado del driver DKMS se muestra bien.
-- Versión **2.2.1**, sin buscar actualizaciones en segundo plano. El actualizador del proyecto original está desactivado porque este es un fork personal: las versiones nuevas del original se revisan y se adaptan a mano.
+- Un único aviso de "daemon desconectado" por ventana, que reacciona a la señal del propio bus del sistema y se cierra solo cuando el daemon vuelve.
+- Basado en la **2.2.1**, con los cambios del original revisados hasta la **v2.3.0** y los útiles adaptados a mano. El actualizador del proyecto original se ha quitado porque este es un fork personal: el Centro de actualizaciones solo muestra la última versión del original y enlaza a ella.
 
 ---
 
